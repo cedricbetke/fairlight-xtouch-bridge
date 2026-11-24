@@ -87,6 +87,46 @@ function check(report: DoctorReport, id: string) {
 }
 
 describe("startup doctor", () => {
+  it("checks network devices through RTP-MIDI probes", async () => {
+    const config = parseConfig({
+      midi: {
+        rescanIntervalMs: 60_000,
+        devices: [
+          { role: "main", transport: "network", network: { host: "127.0.0.1", port: 5004 } },
+        ],
+      },
+      mapping: { master: { enabled: false } },
+      logLevel: "error",
+    });
+    const fairlight = new MockFairlightClient({ logger, ...HEALTHY_FAIRLIGHT });
+    await fairlight.connect();
+    const base = {
+      config,
+      host: "127.0.0.1",
+      port: 9000,
+      ports: { inputs: [], outputs: [] },
+      fairlight: { client: fairlight },
+    };
+    try {
+      const accepted = runDoctor({
+        ...base,
+        network: [{ role: "main", endpoint: "127.0.0.1:5004", ok: true, reason: null }],
+      });
+      assert.equal(check(accepted, "midi.main")?.status, "ok");
+
+      const rejected = runDoctor({
+        ...base,
+        network: [{ role: "main", endpoint: "127.0.0.1:5004", ok: false, reason: "invitation rejected" }],
+      });
+      assert.equal(check(rejected, "midi.main")?.status, "fail");
+      assert.match(check(rejected, "midi.main")?.message ?? "", /invitation rejected/);
+
+      const skipped = runDoctor({ ...base, network: null });
+      assert.equal(check(skipped, "midi.main")?.status, "warn");
+    } finally {
+      await fairlight.disconnect();
+    }
+  });
   it("reports a fully wired setup without warnings", async () => {
     const report = await diagnose(healthyConfig());
     assert.equal(report.summary.fail, 0);
@@ -183,6 +223,59 @@ describe("startup doctor", () => {
     const allowlist = check(report, "safety.write_allowlist");
     assert.equal(allowlist?.status, "warn");
     assert.match(allowlist?.message ?? "", /7 channel/);
+  });
+
+  it("checks the main display measurement source", async () => {
+    const missing = parseConfig({
+      midi: {
+        rescanIntervalMs: 60_000,
+        devices: [
+          {
+            role: "main",
+            input: "X-Touch",
+            output: "X-Touch",
+            mainDisplay: {
+              mode: "meter",
+              meter: {
+                measurement: "headroom",
+                target: { kind: "bus", busType: "aux", index: 9 },
+              },
+            },
+          },
+        ],
+      },
+      mapping: { master: { enabled: false } },
+      logLevel: "error",
+    });
+    const failing = await diagnose(missing);
+    assert.equal(check(failing, "fairlight.main_display")?.status, "fail");
+
+    const available = parseConfig({
+      midi: {
+        rescanIntervalMs: 60_000,
+        devices: [
+          {
+            role: "main",
+            input: "X-Touch",
+            output: "X-Touch",
+            mainDisplay: {
+              mode: "meter",
+              meter: {
+                measurement: "loudness",
+                target: { kind: "bus", busType: "main", index: 1 },
+              },
+            },
+          },
+        ],
+      },
+      mapping: { master: { enabled: false } },
+      logLevel: "error",
+    });
+    const passing = await diagnose(available, {
+      ...HEALTHY_FAIRLIGHT,
+      buses: [{ type: "main", index: 1, name: "Main", integratedLufs: -23.1 }],
+    });
+    assert.equal(check(passing, "fairlight.main_display")?.status, "ok");
   });
 
   it("skips both checks when requested and never fails without input", () => {

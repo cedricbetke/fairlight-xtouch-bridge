@@ -10,6 +10,12 @@ export interface MockEmberProviderOptions {
   monitorCount?: number;
   logger: Logger;
   levelDecimals?: number;
+  /** Set to false to simulate a Fairlight tree without the `system/onair` parameter. */
+  withOnAir?: boolean;
+  /** Keeps a client write unconfirmed for this long, so it can stay in flight during a disconnect. */
+  setValueDelayMs?: number;
+  /** Observes values that clients successfully wrote, after the optional delay. */
+  onValueWritten?: (identifier: string, value: unknown) => void;
 }
 
 interface ParameterNode {
@@ -66,6 +72,7 @@ export class MockEmberProvider {
   readonly #busNodes = new Map<string, Model.NumberedTreeNode<Model.EmberElement>>();
   readonly #monitorNodes = new Map<number, Model.NumberedTreeNode<Model.EmberElement>>();
   #channelRoot: Model.NumberedTreeNode<Model.EmberElement> | null = null;
+  #onAirNode: Model.NumberedTreeNode<Model.EmberElement> | null = null;
   #started = false;
 
   constructor(options: MockEmberProviderOptions) {
@@ -125,14 +132,27 @@ export class MockEmberProvider {
     for (const [typeIndex, type] of BUS_TYPES.entries()) {
       const nodes: Array<Model.NumberedTreeNode<Model.EmberElement>> = [];
       for (let index = 1; index <= 2; index += 1) {
+        const children: Array<Model.NumberedTreeNode<Model.EmberElement>> = [
+          makeParameter(1, Model.ParameterType.Real, "level", -6, Model.ParameterAccess.ReadWrite, -100, 10),
+          makeParameter(2, Model.ParameterType.Boolean, "mute", false, Model.ParameterAccess.ReadWrite),
+          makeParameter(3, Model.ParameterType.String, "name", `${type.toUpperCase()} ${index}`, Model.ParameterAccess.ReadWrite),
+        ];
+        if (type === "main") {
+          children.push(
+            new Model.NumberedTreeNodeImpl(
+              4,
+              new Model.EmberNodeImpl("meters", "Meters"),
+              Model.childrenOf([
+                makeParameter(1, Model.ParameterType.Real, "meter", -6, Model.ParameterAccess.Read, -60, 0),
+                makeParameter(2, Model.ParameterType.Real, "integrated", -23, Model.ParameterAccess.Read, -100, 18),
+              ]),
+            ),
+          );
+        }
         const node = new Model.NumberedTreeNodeImpl(
           index,
           new Model.EmberNodeImpl(`${type}${index}`, `${type.toUpperCase()} ${index}`),
-          Model.childrenOf([
-            makeParameter(1, Model.ParameterType.Real, "level", -6, Model.ParameterAccess.ReadWrite, -100, 10),
-            makeParameter(2, Model.ParameterType.Boolean, "mute", false, Model.ParameterAccess.ReadWrite),
-            makeParameter(3, Model.ParameterType.String, "name", `${type.toUpperCase()} ${index}`, Model.ParameterAccess.ReadWrite),
-          ]),
+          Model.childrenOf(children),
         );
         this.#busNodes.set(`${type}:${index}`, node);
         nodes.push(node);
@@ -156,10 +176,15 @@ export class MockEmberProvider {
       this.#monitorNodes.set(index, node);
       monitorChildren.push(node);
     }
+    const systemChildren: Array<Model.NumberedTreeNode<Model.EmberElement>> = [
+      new Model.NumberedTreeNodeImpl(1, new Model.EmberNodeImpl("loudness", "Loudness")),
+    ];
+    if (this.#options.withOnAir !== false) {
+      this.#onAirNode = makeParameter(2, Model.ParameterType.Boolean, "onair", false, Model.ParameterAccess.Read);
+      systemChildren.push(this.#onAirNode);
+    }
     const tree = Model.childrenOf([
-      makeRoot(0, "system", "System", [
-        new Model.NumberedTreeNodeImpl(1, new Model.EmberNodeImpl("loudness", "Loudness")),
-      ]),
+      makeRoot(0, "system", "System", systemChildren),
       this.#channelRoot,
       ...busRoots,
       makeRoot(8, "monitor", "Monitoring", monitorChildren),
@@ -190,8 +215,16 @@ export class MockEmberProvider {
       } else {
         return false;
       }
+      const delayMs = this.#options.setValueDelayMs ?? 0;
+      if (delayMs > 0) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, delayMs);
+        });
+        if (!this.#started) return false;
+      }
       this.#server.update(node, { value: applied } as never);
       this.#logger.debug("mock_ember.value_set", { identifier, value: applied });
+      this.#options.onValueWritten?.(identifier ?? "unknown", applied);
       return true;
     };
 
@@ -210,6 +243,11 @@ export class MockEmberProvider {
     this.disconnectClients();
     this.#server.discard();
     this.#logger.info("mock_ember.stopped");
+  }
+
+  /** Adjusts the confirmation delay at runtime, for tests that need a specific timing. */
+  setValueDelayMs(delayMs: number): void {
+    this.#options.setValueDelayMs = delayMs;
   }
 
   disconnectClients(): void {
@@ -290,6 +328,31 @@ export class MockEmberProvider {
     return updated;
   }
 
+  /** Pushes values of the nested `meters` container of a bus. */
+  updateBusMeters(type: BusType, index: number, fields: { meterDb?: number; integratedLufs?: number }): boolean {
+    const node = this.#busNodes.get(`${type}:${index}`);
+    if (!node?.children) return false;
+    const meters = [...node.children.values()].find(
+      (child) =>
+        (child as unknown as ParameterNode).contents.identifier === "meters" &&
+        (child as unknown as Model.NumberedTreeNode<Model.EmberElement>).children,
+    ) as unknown as Model.NumberedTreeNode<Model.EmberElement> | undefined;
+    if (!meters?.children) return false;
+    let updated = false;
+    for (const child of meters.children.values()) {
+      const identifier = (child as unknown as ParameterNode).contents.identifier;
+      const parameter = child as unknown as Model.NumberedTreeNode<Model.EmberElement>;
+      if (identifier === "meter" && fields.meterDb !== undefined) {
+        this.#server.update(parameter, { value: fields.meterDb } as never);
+        updated = true;
+      } else if (identifier === "integrated" && fields.integratedLufs !== undefined) {
+        this.#server.update(parameter, { value: fields.integratedLufs } as never);
+        updated = true;
+      }
+    }
+    return updated;
+  }
+
   updateMonitor(index: number, fields: { levelDb?: number; muted?: boolean; dimmed?: boolean }): boolean {
     const node = this.#monitorNodes.get(index);
     if (!node?.children) return false;
@@ -309,6 +372,12 @@ export class MockEmberProvider {
       }
     }
     return updated;
+  }
+
+  updateOnAir(value: boolean): boolean {
+    if (!this.#onAirNode) return false;
+    this.#server.update(this.#onAirNode, { value } as never);
+    return true;
   }
 
   touchChannelRoot(description: string): boolean {

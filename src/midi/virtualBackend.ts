@@ -50,6 +50,15 @@ export class VirtualMidiBackend implements MidiBackend {
     device.outputListeners.clear();
   }
 
+  /** Removes the present device at a port index, matching the index used by listInputs(). */
+  removeDeviceAt(index: number): void {
+    const device = this.#devices.filter((entry) => entry.present)[index];
+    if (!device) return;
+    device.present = false;
+    device.inputListeners.clear();
+    device.outputListeners.clear();
+  }
+
   addDeviceBack(inputName: string): void {
     const device = this.#devices.find((entry) => entry.inputName === inputName);
     if (device) {

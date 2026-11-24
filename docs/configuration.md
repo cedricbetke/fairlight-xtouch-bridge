@@ -49,10 +49,12 @@ npm run dev -- config validate --config config/bridge.json
 | `kind` | `main` or `extender` | Hardware type. Defaults to `main` for role `main`, otherwise `extender` |
 | `name` | string or `null` | Display name in the settings page |
 | `enabled` | `true` / `false` | Disabled devices are ignored |
-| `transport` | `usb` or `network` | Only `usb` is opened. `network` (with `host` and `port`, default RTP-MIDI port 5004) is stored as a draft; the bridge does not open network devices yet |
-| `input` / `output` | `{ "name": "...", "occurrence": 0 }` | Exact CoreMIDI port name and index among ports with that name |
+| `transport` | `usb` or `network` | `usb` uses the native MIDI ports. `network` opens an RTP-MIDI/AppleMIDI session to `network.host`; the USB selectors are then optional |
+| `input` / `output` | `{ "name": "...", "occurrence": 0 }` | Exact CoreMIDI port name and index among ports with that name. Required for `usb`, optional for `network` |
+| `network` | `{ "host": "...", "port": 5004 }` | Required for `network`. `port` is the control port; the bridge also uses the next port for MIDI data. Set `port` to the value configured on the unit |
 | `encoder` | `off` or `pan` | What the eight encoders control |
 | `meters` | `true` / `false` | Show signal meters on the LED strips |
+| `mainDisplay` | `{ "mode": ..., "scope": ... }` | Content of the ten-digit display on the main unit. Only valid with `kind: "main"`; `off` is the default and leaves the display untouched. See [Main display](#main-display) |
 
 Example for one main unit and one extender:
 
@@ -85,7 +87,71 @@ Example for one main unit and one extender:
 
 Port names must match `midi list` exactly. For two devices with the same name, use `occurrence: 0` and `occurrence: 1`.
 
+For Ethernet, configure the unit to `MC` → `NETWORK` → RTP **SLAVE** and give it a static or DHCP address. The bridge acts as the session initiator:
+
+```json
+{
+  "role": "extender1",
+  "kind": "extender",
+  "enabled": true,
+  "transport": "network",
+  "network": { "host": "192.168.1.29", "port": 5004 },
+  "encoder": "pan",
+  "meters": true
+}
+```
+
+`input` and `output` can be omitted for network devices. Each unit needs a unique `network.host:port`; the bridge uses the control port and the data port above it, so keep both free. See [`config/bridge.network.example.json`](../config/bridge.network.example.json) for a mixed USB/Ethernet setup.
+
+The bridge is an RTP-MIDI initiator only. It does not advertise itself via Bonjour, and **Find** in the settings page is still USB-only. The connection test does open a short RTP-MIDI session; stop the bridge for that unit first if the unit refuses a second session.
+
 The settings page also lists devices in left-to-right order, which is stored in `mapping.layout.order`.
+
+### Main display
+
+The main X-Touch has a ten-digit seven-segment display above the transport keys and two smaller assignment digits. In MC mode each large digit is written with its own Control Change, counted from the right: CC 64 is the rightmost digit, CC 73 the leftmost, and CC 74–75 are the assignment digits. Adding `0x40` to the value lights the decimal point of that digit. The bridge only uses characters whose encoding is backed by the protocol references and other MCU implementations: digits, `A`–`Z`, `-` and the per-digit dot.
+
+| Mode | Content |
+|---|---|
+| `off` | Default. The bridge sends no display message and leaves the digits as they are. |
+| `auto` | The visible channel range in the main mix, and the active aux while *sends on fader* is active. |
+| `channels` | The visible channel range only. |
+| `clock` | Local time of the bridge host, placed in the physical 3‑2‑2‑3 digit groups. |
+| `meter` | A Fairlight measurement, see below. |
+| `on-air` | `ON AIR` or `OFF AIR` from `system/onair`. Experimental: word legibility on seven-segment digits is not verified on the device, and an unknown state stays blank. |
+
+`scope` selects which strips the channel range counts: `surface` (default, all connected units in layout order) or `main` (main unit only). Buses and the master fader are not counted.
+
+A gap-free run is shown as two digit blocks, for example `25  32`. When the visible channels have gaps, the display shows only the first visible channel. The range deliberately avoids `-` because its visibility on the X-Touch is not verified. When Fairlight is disconnected the display is cleared, except in `clock` mode. A missing target keeps its setting but shows nothing.
+
+In `meter` mode, `measurement` selects the Fairlight value and `target` the bus:
+
+| Measurement | Source | Display |
+|---|---|---|
+| `loudness` | `main/mainN/meters/integrated` (main buses only) | Integrated loudness in LUFS with one decimal, e.g. `-23.1`. The sign is part of the value. |
+| `headroom` | `<type>/<typeN>/meter` (any bus) | Peak headroom to 0 dB, e.g. `3.2` for a peak of −3.2 dB. Deliberately positive so it never depends on a minus sign. |
+
+The bridge reads the selected value and subscribes to the bus meter parameters whenever the meter mode or an LED meter chain is active. It never triggers `system/reset-loudness` and leaves the display blank when Fairlight has no reading for the target.
+
+```json
+"mainDisplay": { "mode": "auto", "scope": "surface" }
+```
+
+```json
+"mainDisplay": {
+  "mode": "meter",
+  "meter": {
+    "measurement": "headroom",
+    "target": { "kind": "bus", "busType": "aux", "index": 2 }
+  }
+}
+```
+
+`mode: "meter"` without a `meter` object falls back to the integrated loudness of `main:1`.
+
+> **Device caveat:** the minus sign in a loudness value is not verified on the real X-Touch. The browser preview shows the intended digits; `headroom` avoids the sign entirely and is the safer choice for on-stage use until the display has been checked.
+
+Changing the setting requires a bridge restart, like every other device option.
 
 ## `mapping`
 
@@ -252,13 +318,17 @@ Writes are only sent when all of the following are true:
 2. The target is in the matching allowlist.
 3. For faders, the strip was touched (if `requireTouchForWrites` is on).
 
-Motors also need `--arm-motor`.
+In the desktop app, step 1 is the **Schreibzugriffe auf Fairlight erlauben** switch in the app section. It is off after every app start. The allowlists can be edited below it under **Schreibziele in der Konfiguration**.
+
+Motors also need `--arm-motor`, or the **Motoren bewegen** switch in the desktop app.
+
+**Duplicate port names.** When two configured devices share a MIDI port name and the list of ports with that name changes while the bridge runs, all roles using that name are locked until the bridge restarts. This prevents a shifted port index from steering the wrong physical unit. The main unit with a unique port name is not affected. See [Troubleshooting](troubleshooting.md#both-extenders-stop-working-after-a-usb-replug).
 
 Keep the allowlist in line with banking: every channel reachable through a bank must be listed, otherwise those strips stay locked even when they are assigned correctly.
 
 ## Settings page
 
-The settings page is a local tool. It runs on your Mac and is available only at `http://127.0.0.1:8787`.
+The settings page is a local tool. It runs on your Mac and is available only at `http://127.0.0.1:8787`. In the desktop app, use the tray icon to open it; if port 8787 is already in use, the app picks a free port and the tray opens the right address.
 
 ```bash
 npm run settings:demo                             # three virtual units, 40 demo channels
@@ -269,12 +339,15 @@ npm run settings -- --port 8790 --no-discover     # other port, no discovery on 
 What you can do there:
 
 - **Devices:** sort by dragging the handle or with the arrows. Add or remove units. Rename them. Choose USB or network.
-- **Find:** blinks the eight SELECT LEDs on the chosen MIDI output, before saving and without a Fairlight connection.
+- **Find:** blinks the eight SELECT LEDs on the chosen MIDI output, before saving and without a Fairlight connection. USB only; Ethernet devices are identified by address instead.
+- **Network:** choose Ethernet for a device, enter the unit's IP address and control port, and test a real RTP-MIDI session. The unit must run as RTP **SLAVE**; stop the bridge if the unit accepts only one session.
 - **Edit device:** the gear button opens a large view of the unit. On the main unit, click F1–F8 or any right-hand key to assign it; reserved keys and modifiers stay locked. With fixed mode, click a channel strip to choose its target.
+- **Main display:** on the main unit, choose what the ten-digit seven-segment display shows. The virtual device renders the result with real segment glyphs in the 3‑2‑2‑3 grouping; bank, aux and on-air can be tried out directly with the simulation buttons, and a measurement mode picks the measurement and its bus. The preview shows what the bridge would send and sends no MIDI; it is not verified on the device.
 - **Assignment:** fixed or banking per device. Fixed devices choose one channel or bus per fader. Banking devices share the rest.
 - **Targets:** choose buses and inputs. A target that is already fixed on another fader is locked.
 - **Ports:** shows whether each port was found, with reasons such as "input missing" or "device disabled".
 - **LCD:** colors, line modes, overrides and a live preview.
+- **On-air:** the header shows **ON AIR**, **OFF AIR** or **Unbekannt**. It is read-only from `system/onair`; the page never switches the state and needs a second read-only Ember+ connection while it is open. In demo mode the badge is hidden because there is no Fairlight connection.
 - **Save:** validates the complete configuration and replaces the file atomically. Changes take effect after the bridge restarts.
 - **Language:** German or English, switched in the page header.
 

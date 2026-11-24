@@ -1,8 +1,12 @@
 {
   "name": "fairlight-xtouch-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
+  "main": "dist/src/app/main.js",
+  "author": {
+    "name": "Cedric Betke"
+  },
   "description": "MCU bridge between Behringer X-Touch controllers and Fairlight Live (Ember+)",
   "license": "MIT",
   "engines": {
@@ -12,8 +16,13 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/cli.js",
     "dev": "tsx src/cli.ts",
+    "app": "npm run build && electron .",
+    "app:pack": "npm run build && electron-builder --dir",
+    "app:dist": "npm run build && electron-builder",
+    "icons": "node scripts/make-icons.mjs",
     "settings": "tsx src/cli.ts settings",
     "settings:demo": "tsx src/cli.ts settings --demo",
+    "soak": "tsx src/cli.ts soak --seconds 60",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "test:watch": "node --import tsx --test --watch \"test/**/*.test.ts\"",
     "check": "tsc -p tsconfig.json --noEmit"
@@ -24,11 +33,75 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   },
+  "homepage": "https://github.com/cedricbetke/fairlight-xtouch-bridge",
+  "build": {
+    "appId": "de.fairlight-xtouch-bridge",
+    "productName": "Fairlight X-Touch Bridge",
+    "artifactName": "Fairlight-XTouch-Bridge-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "dist/src/**/*",
+      "web/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/@julusian/midi/**/*",
+      "**/*.node"
+    ],
+    "npmRebuild": false,
+    "mac": {
+      "category": "public.app-category.music",
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "Fairlight X-Touch Bridge"
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "category": "AudioVideo",
+      "maintainer": "Cedric Betke <cedricbetke@users.noreply.github.com>",
+      "target": [
+        "deb"
+      ]
+    }
+  },
   "allowScripts": {
     "@julusian/midi@3.9.0": true,
-    "esbuild@0.28.2": true
+    "esbuild@0.28.2": true,
+    "electron": true,
+    "electron-winstaller": false
   }
 }

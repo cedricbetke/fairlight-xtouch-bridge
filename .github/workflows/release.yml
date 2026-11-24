@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Type check, tests and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run check
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  package:
+    name: Package ${{ matrix.label }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS (Apple Silicon)
+            os: macos-14
+            command: npx electron-builder --mac --arm64 --publish never
+          - label: Windows (x64)
+            os: windows-latest
+            command: npx electron-builder --win --x64 --publish never
+          - label: Linux (x64)
+            os: ubuntu-latest
+            command: npx electron-builder --linux --x64 --publish never
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Build installer
+        run: ${{ matrix.command }}
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            release/*.dmg
+            release/*.exe
+            release/*.deb
+
+  release:
+    name: Draft release
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List installers
+        run: ls -R artifacts
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: artifacts/*
+          body: |
+            ## Install
+
+            Download the installer for your platform, install it and open
+            **Fairlight X-Touch Bridge** from the Start menu, Applications folder or
+            application launcher. The settings page opens in your browser.
+
+            - **macOS (Apple Silicon):** `.dmg`
+            - **Windows (x64):** `.exe` (preview)
+            - **Linux (x64, Debian/Ubuntu):** `.deb` (preview)
+
+            The app bundles its own runtime. Git, Node.js and npm are not required.
+
+            Windows and Linux builds are previews until USB MIDI has been verified
+            with a real X-Touch on those platforms. Without code signing certificates
+            macOS Gatekeeper and Windows SmartScreen may show a warning.

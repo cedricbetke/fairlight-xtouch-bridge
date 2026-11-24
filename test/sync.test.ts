@@ -2,7 +2,12 @@ import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 
 import { parseConfig } from "../src/config.js";
-import { MockFairlightClient, type MockAuxSendSpec, type MockMonitorSpec } from "../src/fairlight/mockClient.js";
+import {
+  MockFairlightClient,
+  type MockAuxSendSpec,
+  type MockBusSpec,
+  type MockMonitorSpec,
+} from "../src/fairlight/mockClient.js";
 import { createLogger } from "../src/logger.js";
 import { MidiDeviceManager } from "../src/midi/deviceManager.js";
 import { VirtualMidiBackend } from "../src/midi/virtualBackend.js";
@@ -29,6 +34,7 @@ interface SetupOptions {
   busCount?: number;
   auxSends?: MockAuxSendSpec[];
   auxBuses?: number[];
+  buses?: MockBusSpec[];
   monitors?: MockMonitorSpec[];
   sendsOnFader?: { enabled: boolean; busIndex: number };
   buttonAssignments?: Record<
@@ -38,6 +44,7 @@ interface SetupOptions {
   lcd?: unknown;
   encoder?: "off" | "pan";
   meters?: boolean;
+  mainDisplay?: unknown;
 }
 
 async function setup(options: SetupOptions = {}) {
@@ -56,6 +63,7 @@ async function setup(options: SetupOptions = {}) {
           output: "Virtual Main",
           encoder: options.encoder ?? "off",
           meters: options.meters ?? false,
+          ...(options.mainDisplay === undefined ? {} : { mainDisplay: options.mainDisplay }),
         },
       ],
     },
@@ -84,14 +92,15 @@ async function setup(options: SetupOptions = {}) {
   const surface = new VirtualMcuSurface(backend, [
     { role: "main", inputName: "Virtual Main", outputName: "Virtual Main" },
   ]);
-  const busSpecs = Array.from(
+  const generatedBuses = Array.from(
     new Set([...(options.auxBuses ?? []), ...(options.auxSends ?? []).map((send) => send.index)]),
   ).map((index) => ({ type: "aux" as const, index, name: `Aux ${index}` }));
+  const busSpecs = options.buses ?? generatedBuses;
   const fairlight = new MockFairlightClient({
     channelCount,
     busCount: options.busCount ?? 1,
     auxSends: options.auxSends,
-    buses: busSpecs.length > 0 ? busSpecs : undefined,
+    buses: busSpecs.length > 0 ? busSpecs : options.buses,
     monitors: options.monitors,
     latencyMs: options.latencyMs ?? 0,
   });
@@ -139,6 +148,31 @@ function lcdText(messages: number[][], device: number, strip: number, row: 0 | 1
     }
   }
   return null;
+}
+
+/**
+ * Rebuilds the current seven-segment frame from the sent Control Changes.
+ * Dotted cells keep a trailing `.`, so the result is not exactly ten characters
+ * when dots are present.
+ */
+function segmentFrame(messages: number[][]): string | null {
+  const cells: string[] = Array.from({ length: 10 }, () => " ");
+  let seen = false;
+  for (const message of messages) {
+    if (!message || message[0] !== 0xb0) continue;
+    const cc = message[1] ?? -1;
+    if (cc < 0x40 || cc > 0x49) continue;
+    const index = 0x49 - cc;
+    const value = message[2] ?? 0x20;
+    const code = value & 0x3f;
+    let character = " ";
+    if (code >= 0x30 && code <= 0x39) character = String.fromCharCode(code);
+    else if (code >= 0x01 && code <= 0x1a) character = String.fromCharCode(0x40 + code);
+    else if (code === 0x2d) character = "-";
+    cells[index] = `${character}${value & 0x40 ? "." : ""}`;
+    seen = true;
+  }
+  return seen ? cells.join("") : null;
 }
 
 function lcdColors(messages: number[][], device: number): number[] | null {
@@ -1167,6 +1201,289 @@ describe("sync engine", () => {
       await waitFor(() => env.sync.status().structureLocked, "lock on duplicate channel name");
       env.fairlight.injectChannelUpdate(2, { name: "CH 02" });
       await waitFor(() => !env.sync.status().structureLocked, "recovery after duplicate name removed");
+    } finally {
+      await teardown(env);
+    }
+  });
+
+  it("leaves the seven-segment display untouched by default", async () => {
+    const env = await setup({ mode: "full", channelCount: 48 });
+    try {
+      env.surface.pressBank("main", "right");
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      assert.equal(segmentFrame(env.surface.sentMessages("main")), null);
+    } finally {
+      await teardown(env);
+    }
+  });
+
+  it("shows the visible channel range and follows banking", async () => {
+    const env = await setup({
+      mode: "full",
+      channelCount: 48,
+      mainDisplay: { mode: "channels" },
+      resetStartupMotors: false,
+    });
+    try {
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main")) !== null,
+        "channel range on the display",
+      );
+      assert.equal(segmentFrame(env.surface.sentMessages("main")), "1  8".padStart(10, " "));
+
+      env.surface.pressBank("main", "right");
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "25  32",
+        "channel range after a bank change",
+      );
+    } finally {
+      await teardown(env);
+    }
+  });
+
+  it("shows the active aux on the display in automatic mode", async () => {
+    const env = await setup({
+      mode: "full",
+      channelCount: 8,
+      auxBuses: [3],
+      sendsOnFader: { enabled: true, busIndex: 3 },
+      mainDisplay: { mode: "auto" },
+      resetStartupMotors: false,
+    });
+    try {
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main")) === "1  8".padStart(10, " "),
+        "channel range before sends on fader",
+      );
+
+      env.surface.pressAssign("main", "send");
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main")) === "03".padStart(10, " "),
+        "aux number while sends on fader is active",
+      );
+
+      env.surface.pressAssign("main", "pan");
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main")) === "1  8".padStart(10, " "),
+        "channel range after leaving sends on fader",
+      );
+    } finally {
+      await teardown(env);
+    }
+  });
+
+  it("shows the confirmed on-air state and clears an unknown one", async () => {
+    const env = await setup({
+      mode: "full",
+      channelCount: 8,
+      mainDisplay: { mode: "on-air" },
+      resetStartupMotors: false,
+    });
+    try {
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main")) === "OFF AIR".padStart(10, " "),
+        "off-air frame",
+      );
+
+      env.fairlight.setOnAir(true);
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main")) === "ON AIR".padStart(10, " "),
+        "on-air frame",
+      );
+
+      env.fairlight.setOnAir(null);
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "",
+        "blank frame for an unknown on-air state",
+      );
+    } finally {
+      await teardown(env);
+    }
+  });
+
+  it("keeps the clock running, also without Fairlight", async () => {
+    const env = await setup({
+      mode: "full",
+      channelCount: 8,
+      mainDisplay: { mode: "clock" },
+      resetStartupMotors: false,
+    });
+    try {
+      await waitFor(() => segmentFrame(env.surface.sentMessages("main")) !== null, "clock frame");
+      const first = segmentFrame(env.surface.sentMessages("main"));
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main")) !== first,
+        "clock tick",
+        3000,
+      );
+
+      env.fairlight.injectDisconnect("clock test");
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const afterDisconnect = segmentFrame(env.surface.sentMessages("main"));
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main")) !== afterDisconnect,
+        "clock after a Fairlight disconnect",
+        3000,
+      );
+    } finally {
+      await teardown(env);
+    }
+  });
+
+  it("rewrites the full frame after the main unit reconnects", async () => {
+    const env = await setup({
+      mode: "full",
+      channelCount: 48,
+      mainDisplay: { mode: "channels" },
+      resetStartupMotors: false,
+    });
+    try {
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main")) === "1  8".padStart(10, " "),
+        "initial channel frame",
+      );
+      env.surface.remove("main");
+      env.manager.scan();
+      await waitFor(
+        () => env.manager.statuses().find((status) => status.role === "main")?.online === false,
+        "main unit offline",
+      );
+      env.surface.clearSent("main");
+      env.surface.restore("main");
+      env.manager.scan();
+      await waitFor(
+        () => env.manager.statuses().find((status) => status.role === "main")?.online === true,
+        "main unit online",
+      );
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "1  8",
+        "frame after the reconnect",
+      );
+      const digits = env.surface
+        .sentMessages("main")
+        .filter(
+          (message) =>
+            message[0] === 0xb0 && (message[1] ?? 0) >= 0x40 && (message[1] ?? 0) <= 0x49,
+        );
+      assert.equal(digits.length, 10);
+    } finally {
+      await teardown(env);
+    }
+  });
+
+  it("clears the display when the sync engine stops", async () => {
+    const env = await setup({
+      mode: "full",
+      channelCount: 8,
+      mainDisplay: { mode: "channels" },
+      resetStartupMotors: false,
+    });
+    try {
+      await waitFor(() => segmentFrame(env.surface.sentMessages("main")) !== null, "channel frame");
+      env.sync.stop();
+      assert.equal(segmentFrame(env.surface.sentMessages("main"))?.trim(), "");
+    } finally {
+      await teardown(env);
+    }
+  });
+
+  it("shows the integrated loudness of the selected main bus", async () => {
+    const env = await setup({
+      mode: "full",
+      channelCount: 8,
+      buses: [
+        { type: "main", index: 1, name: "Main", integratedLufs: -23.1, meterDb: -3.2 },
+        { type: "aux", index: 2, name: "Aux 2", integratedLufs: null, meterDb: -6 },
+      ],
+      mainDisplay: {
+        mode: "meter",
+        meter: {
+          measurement: "loudness",
+          target: { kind: "bus", busType: "main", index: 1 },
+        },
+      },
+      resetStartupMotors: false,
+    });
+    try {
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "-23.1",
+        "loudness frame",
+      );
+
+      env.fairlight.injectBusUpdate("main", 1, { integratedLufs: -18.4 });
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "-18.4",
+        "updated loudness frame",
+      );
+
+      const digitsBefore = env.surface
+        .sentMessages("main")
+        .filter((message) => message[0] === 0xb0 && (message[1] ?? 0) >= 0x40 && (message[1] ?? 0) <= 0x49)
+        .length;
+      env.fairlight.injectBusUpdate("aux", 2, { meterDb: -12 });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      assert.equal(segmentFrame(env.surface.sentMessages("main"))?.trim(), "-18.4");
+      assert.equal(
+        env.surface
+          .sentMessages("main")
+          .filter((message) => message[0] === 0xb0 && (message[1] ?? 0) >= 0x40 && (message[1] ?? 0) <= 0x49)
+          .length,
+        digitsBefore,
+      );
+
+      env.fairlight.injectDisconnect("meter display test");
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "",
+        "blank frame after a disconnect",
+      );
+
+      await env.fairlight.connect();
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "-18.4",
+        "loudness frame after a reconnect",
+      );
+
+      env.fairlight.removeBus("main", 1);
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "",
+        "blank frame after the measured bus disappears",
+      );
+    } finally {
+      await teardown(env);
+    }
+  });
+
+  it("shows the headroom reserve of the selected bus", async () => {
+    const env = await setup({
+      mode: "full",
+      channelCount: 8,
+      buses: [{ type: "aux", index: 2, name: "Stream", meterDb: -3.2 }],
+      mainDisplay: {
+        mode: "meter",
+        meter: {
+          measurement: "headroom",
+          target: { kind: "bus", busType: "aux", index: 2 },
+        },
+      },
+      resetStartupMotors: false,
+    });
+    try {
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "3.2",
+        "headroom frame",
+      );
+
+      env.fairlight.injectBusUpdate("aux", 2, { meterDb: -6 });
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "6.0",
+        "updated headroom frame",
+      );
+
+      env.fairlight.injectDisconnect("headroom display test");
+      await waitFor(
+        () => segmentFrame(env.surface.sentMessages("main"))?.trim() === "",
+        "blank headroom frame after a disconnect",
+      );
     } finally {
       await teardown(env);
     }

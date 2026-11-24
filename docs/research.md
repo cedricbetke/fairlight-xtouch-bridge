@@ -31,6 +31,8 @@ The Fairlight Live 1.1.1 release notes mention no change to Ember+. The protocol
 - The manual lists the main meter under `meters/meter`; a published show dump from a third party observed `main/mainN/meter`. The bridge reads meters and accepts both paths (direct `meter` and nested `meters/meter`), so the deviation is handled; which path Fairlight Live 1.1.1 actually publishes for main buses was not verified separately on the device.
 - Whether Fairlight 1.1.1 reliably sends parameter changes as a push is not fully documented. In testing, level, mute and name changes were pushed; the client subscribes to parameters and strip nodes and re-reads on structural changes. A polling fallback for individual faders is not implemented.
 - The tree reports new or deleted channels via root updates. During re-discovery the bridge briefly locks and then automatically adopts the new structure (positional mapping). There is no stable identity across reordering.
+- `system/onair` is documented as a Boolean. The bridge reads and subscribes to it for a read-only on-air badge and never writes it. The mock provider covers the path, including a missing parameter; whether Fairlight Live 1.1.1 pushes changes and whether every show exposes it still has to be checked on the studio Mac.
+- CoreMIDI exposes no stable endpoint identifier through the MIDI backend in use. Two extenders with the same port name are therefore bound by occurrence and index only. If the port list for a shared name changes, the bridge locks all affected roles until restart instead of guessing which physical unit moved.
 
 ### Measurements on the studio Mac (22 Nov 2026)
 
@@ -83,7 +85,26 @@ Sources for the byte mapping:
 - Behringer X-Touch Quick Start and Extender product page (device functions, MC mode)
 - FLtouch (only as protocol corroboration; license CC BY-NC-SA, **no code adopted**)
 
-The bridge currently uses faders, touch, mute, bank, master, the LCD display with channel names, line modes, type colors and manual exceptions, the pan control via the encoders including the V-Pot ring, and the level indicators from the Ember+ meter parameter. Select, Solo, Record and Jog are decoded but not sent to Fairlight. Encoder deltas move pan in steps of five units; encoder push resets to center. Meter and pan subscriptions run only if the respective function is enabled per device.
+The bridge currently uses faders, touch, mute, bank, master, the LCD display with channel names, line modes, type colors and manual exceptions, the pan control via the encoders including the V-Pot ring, and the level indicators from the Ember+ meter parameter. Select, Solo, Record and Jog are decoded but not sent to Fairlight. Encoder deltas move pan in steps of five units; encoder push resets to center. Pan subscriptions run for every discovered bus and channel. Channel and bus meter parameters are subscribed when LED meters are enabled on any device, or when the main display uses the `meter` mode, because the display reads the same parameters.
+
+### Main-unit seven-segment display (24 Nov 2026)
+
+The large X-Touch has a ten-digit timecode display and two assignment digits ([Behringer](https://www.behringer.com/en/products/0808-AAD)). In MC mode each digit is addressed with its own Control Change, counted from the right: CC 64–73 for timecode and CC 74–75 for assignment. The value carries the character code; `0x40` added to it lights that digit's decimal point.
+
+Sources agree on digits `0x30`–`0x39`, `A`–`Z` as `0x01`–`0x1A` and `-` as `0x2D`. Cubase's X-Touch MIDI Remote script writes digits and dots this way ([`SegmentDisplayManager.ts`](https://github.com/bjoluc/cubase-mcu-midiremote/blob/main/src/midi/managers/SegmentDisplayManager.ts)). ReaLearn encodes the same range and uses a space with dot (`0x20 + 0x40`) for a lone period ([`midi_source.rs`](https://github.com/helgoboss/helgoboss-learn/blob/master/src/source/midi_source.rs#L2013-L2054)); Ardour's Mackie surface uses the same translation ([`surface.cc`](https://github.com/Ardour/ardour/blob/master/libs/surfaces/mackie/surface.cc#L1305-L1317)). An Ableton X-Touch script shows the local clock and short messages on the display, including the 3‑2‑2‑3 layout used for time code ([`TimeDisplay.py`](https://github.com/Kik07L/Behringer-X-Touch-for-ableton/blob/main/XTouch/TimeDisplay.py#L174-L221)).
+
+The bridge uses this display for the visible channel range, the active aux, the host clock, a Fairlight measurement and, as an experimental option, the on-air state.
+
+The measurement mode reads documented Ember+ values: integrated loudness from `main/mainN/meters/integrated` and the peak level from `<type>/<typeN>/meter` (for the headroom reserve). The diagnostics-only tree in the documentation lists them as read-only real values; the bridge subscribes to the bus meter parameters whenever the meter mode or an LED meter chain is active, and never calls `system/reset-loudness`. Discovery, subscription and display formatting are covered by tests against the mock Ember+ provider and the virtual MIDI backend. **Not verified:** the live value range and refresh rate of a real Fairlight instance, and whether Fairlight exposes `meters` on every main bus in a given show. The byte mapping and deduplication are covered by automated tests against a virtual MIDI backend. **Visual verification on the real X-Touch is still open:** whether `-` and words such as `ON AIR` are clearly readable, and whether the display needs a rewrite after a real USB replug, has not been checked on the device. The bridge therefore avoids the hyphen in normal output and marks the on-air mode as experimental.
+
+Sources:
+
+- [Behringer X-Touch product data](https://www.behringer.com/en/products/0808-AAD)
+- [TouchMCU MCU protocol reference](https://github.com/NicoG60/TouchMCU/blob/main/doc/mackie_control_protocol.md)
+- [Cubase X-Touch MIDI Remote script](https://github.com/bjoluc/cubase-mcu-midiremote)
+- [ReaLearn Mackie seven-segment encoder](https://github.com/helgoboss/helgoboss-learn)
+- [Ardour Mackie surface implementation](https://github.com/Ardour/ardour/blob/master/libs/surfaces/mackie/surface.cc)
+- [Ableton X-Touch script with clock and messages](https://github.com/Kik07L/Behringer-X-Touch-for-ableton)
 
 ### Fader curve
 
@@ -100,6 +121,16 @@ Sources:
 - `@julusian/midi`: <https://www.npmjs.com/package/@julusian/midi>
 - Apple CoreMIDI Unique ID: <https://developer.apple.com/documentation/coremidi/kmidipropertyuniqueid>
 - Apple CoreMIDI Notifications: <https://developer.apple.com/documentation/coremidi/midinotificationmessageid>
+
+### AppleMIDI and RTP-MIDI (24 Nov 2026)
+
+The bridge implements the session and payload parts it needs internally, without a third-party MIDI-over-IP library:
+
+- Session control follows Apple's MIDI Network Driver protocol: AppleMIDI invitations (`IN`/`OK`/`NO`/`BY`) with initiator token and SSRC, sent to the peer's control port and repeated on the data port above it. The bridge always acts as the initiator, so the X-Touch has to be configured as RTP **SLAVE**.
+- Clock sync uses `CK` packets on the data port. The bridge sends a sync exchange at the start and every 10 seconds. Receiver feedback (`RS`) and bitrate limits (`RL`) are parsed but not used.
+- MIDI runs as RTP-MIDI with payload type 97, a 10 kHz clock and one MIDI command per packet. SysEx, including the X-Touch LCD messages, is encoded with the short or long MIDI-list header as needed.
+- The bridge does not send a recovery journal and ignores incoming journals. Apple's driver requires no journal in received packets, but this point has to be checked on the real device.
+- Verified against a local AppleMIDI responder in both directions: invitation on both ports, clock sync, faders, notes, running status, segmented SysEx, reconnect after a peer restart and rejection of a second session. Hardware validation with X-Touch and Extender is still open.
 
 ## 4. Ember+ library
 
