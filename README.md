@@ -37,7 +37,8 @@ Not supported: Select, Solo/PFL, and plugin control, because there is no verifie
 ## Quick start (no hardware needed)
 
 ```bash
-cd /path/to/FairlighteEmberBridgeMcu
+git clone https://github.com/cedricbetke/fairlight-xtouch-bridge.git
+cd fairlight-xtouch-bridge
 npm ci
 npm run build
 npm test

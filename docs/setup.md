@@ -21,7 +21,8 @@ If you only want to try the software, the [Quick start in the README](../README.
 Requirements: macOS with Apple Silicon and Node.js 26 LTS.
 
 ```bash
-cd /path/to/FairlighteEmberBridgeMcu
+git clone https://github.com/cedricbetke/fairlight-xtouch-bridge.git
+cd fairlight-xtouch-bridge
 nvm use            # optional; .nvmrc contains 26
 npm ci
 npm run build
