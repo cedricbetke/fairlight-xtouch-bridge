@@ -1,0 +1,8 @@
+node_modules/
+dist/
+config/bridge.json
+config/bridge.poc.json
+config/bridge.demo.json
+*.log
+.DS_Store
+.env

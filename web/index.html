@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0c1014" />
+    <title>Ember Bridge · Einstellungen</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="topbar-inner">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 32 32" role="img">
+                <rect x="1" y="1" width="30" height="30" rx="8" />
+                <path d="M9 9v14M15 9v9M21 9v14M27 9v6" />
+              </svg>
+            </span>
+            <div class="brand-text">
+              <p class="eyebrow">Fairlight Ember Bridge</p>
+              <h1>Einstellungen</h1>
+            </div>
+          </div>
+          <div class="topbar-tools">
+            <label class="lang-switch">
+              <svg class="icon" viewBox="0 0 20 20" aria-hidden="true">
+                <circle cx="10" cy="10" r="7" />
+                <path d="M3 10h14M10 3c2.6 2.5 2.6 11.5 0 14M10 3c-2.6 2.5-2.6 11.5 0 14" />
+              </svg>
+              <select id="langSelect" aria-label="Sprache">
+                <option value="de" lang="de">Deutsch</option>
+                <option value="en" lang="en">English</option>
+              </select>
+            </label>
+            <div class="topbar-status" aria-live="polite">
+              <span class="badge badge-demo" id="modeBadge" hidden>Demo</span>
+              <span class="status-pill" id="fairlightPill" data-state="idle">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span id="fairlightStatus">Fairlight wird geprüft …</span>
+              </span>
+            </div>
+          </div>
+        </div>
+        <nav class="section-nav" aria-label="Bereiche">
+          <a href="#verbindung">Verbindung</a>
+          <a href="#geraete">Geräte</a>
+          <a href="#lcd">LCD-Anzeige</a>
+        </nav>
+      </header>
+
+      <main class="content">
+        <section id="verbindung" class="panel connection-panel" aria-labelledby="fairlightHeading">
+          <div class="panel-heading">
+            <div>
+              <h2 id="fairlightHeading">Fairlight</h2>
+              <p data-i18n-html="connection.help">Ember+ in Fairlight unter <strong>File → Show Settings → Ember+</strong> aktivieren und den angezeigten Port übernehmen.</p>
+            </div>
+            <span class="chip" id="channelCount">Kanäle werden geladen</span>
+          </div>
+          <form class="connection-form" id="discoverForm">
+            <label class="field">
+              <span>Host</span>
+              <input id="fairlightHost" name="host" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="field field-narrow">
+              <span>Port</span>
+              <input id="fairlightPort" name="port" type="number" inputmode="numeric" min="1" max="65535" />
+            </label>
+            <button type="submit" class="btn btn-secondary" id="discoverButton">
+              <svg class="icon" viewBox="0 0 20 20" aria-hidden="true">
+                <path d="M10 3v3M10 14v3M3 10h3M14 10h3M5.05 5.05l2.12 2.12M12.83 12.83l2.12 2.12M14.95 5.05l-2.12 2.12M7.17 12.83l-2.12 2.12" />
+                <circle cx="10" cy="10" r="3.2" />
+              </svg>
+              Kanäle einlesen
+            </button>
+            <p class="form-message" id="discoverMessage" role="status"></p>
+          </form>
+          <p class="mode-notice" id="singleChannelNotice" hidden>
+            Der Ein-Kanal-Testmodus ist aktiv. Beim Speichern wird auf die Gerätebelegung umgestellt.
+          </p>
+        </section>
+
+        <section id="geraete" class="devices-panel" aria-labelledby="devicesHeading">
+          <div class="devices-toolbar">
+            <div>
+              <h2 id="devicesHeading">Geräte</h2>
+              <p>Am Griff ziehen oder mit den Pfeilen sortieren. Die Reihenfolge entspricht der Aufstellung von links nach rechts.</p>
+            </div>
+            <div class="devices-actions">
+              <div class="bank-toolbar" aria-label="Bank-Vorschau">
+                <span class="bank-caption">Bank-Vorschau</span>
+                <button type="button" class="icon-btn" id="bankPrev" aria-label="Vorherige Bank">
+                  <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" /></svg>
+                </button>
+                <span class="bank-value" id="bankLabel">Bank 1 / 1</span>
+                <button type="button" class="icon-btn" id="bankNext" aria-label="Nächste Bank">
+                  <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 4.5 13 10l-5.5 5.5" /></svg>
+                </button>
+              </div>
+              <button type="button" class="btn btn-secondary add-device-btn" id="addDevice">
+                <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" /></svg>
+                Gerät hinzufügen
+              </button>
+              <button type="button" class="btn btn-ghost" id="refreshPorts">
+                <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 7A6 6 0 1 0 16 12" /><path d="M15.5 3.5V7H12" /></svg>
+                Ports neu einlesen
+              </button>
+            </div>
+          </div>
+          <p class="form-message ports-message" id="portsMessage" role="status"></p>
+          <div class="device-row" id="deviceRow" aria-live="polite"></div>
+          <div class="device-footnote">
+            <span class="legend"><i class="legend-dot" aria-hidden="true"></i> SELECT</span>
+            <span data-i18n-html="devices.footnote"><strong>Bearbeiten</strong> öffnet die große Ansicht des Geräts. <strong>Finden</strong> lässt die SELECT-LEDs blinken. <strong>Fest</strong> hält die acht Ziele. <strong>Banking</strong> folgt der gemeinsamen Bank-Vorschau.</span>
+            <span class="legend-hint">Die Bank-Tasten am Main wechseln beim Betrieb.</span>
+          </div>
+        </section>
+
+        <section id="lcd" class="panel lcd-panel" aria-labelledby="lcdHeading">
+          <div class="panel-heading">
+            <div>
+              <h2 id="lcdHeading">LCD-Anzeige</h2>
+              <p>Hintergrundfarbe nach Kanaltyp und die beiden Textzeilen der acht Kanalfelder. Farben und Kurznamen folgen dem Kanal beim Banking.</p>
+            </div>
+            <span class="chip" id="lcdSummary">Farben aktiv</span>
+          </div>
+          <div class="lcd-toolbar">
+            <label class="check-row lcd-toggle"><input type="checkbox" id="lcdEnabled" /> LCD-Farben aktiv</label>
+            <label class="field lcd-line-field">
+              <span>Obere Zeile</span>
+              <select id="lcdLine1"></select>
+            </label>
+            <label class="field lcd-line-field">
+              <span>Untere Zeile</span>
+              <select id="lcdLine2"></select>
+            </label>
+            <button type="button" class="btn btn-ghost" id="lcdReset">Standardfarben</button>
+          </div>
+          <div class="lcd-section">
+            <h3>Farbe nach Kanaltyp</h3>
+            <div class="lcd-palette" id="lcdPalette"></div>
+          </div>
+          <div class="lcd-section">
+            <div class="lcd-overrides-head">
+              <h3>Ausnahmen und Kurznamen</h3>
+              <label class="search-field lcd-search">
+                <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12.5 12.5 4 4" /></svg>
+                <input id="lcdSearch" type="search" placeholder="Kanal oder Bus suchen …" autocomplete="off" spellcheck="false" />
+              </label>
+            </div>
+            <p class="lcd-hint">Automatisch nutzt die Typfarbe. Ein Kurzname ersetzt in der oberen Zeile den Fairlight-Namen. Ausnahmen pausieren, sobald der Fairlight-Name nicht mehr zum gespeicherten Namen passt.</p>
+            <div class="lcd-override-list" id="lcdOverrideList"></div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="savebar">
+        <div class="savebar-text">
+          <strong id="saveState">Alles gespeichert</strong>
+          <span>Änderungen gelten ab dem nächsten Bridge-Start.</span>
+        </div>
+        <div class="savebar-actions">
+          <button type="button" class="btn btn-ghost" id="reloadButton">Verwerfen</button>
+          <button type="button" class="btn btn-primary" id="saveButton" disabled>Speichern</button>
+        </div>
+      </footer>
+    </div>
+
+    <dialog id="deviceDialog" class="device-dialog" aria-labelledby="deviceDialogTitle">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">Gerät bearbeiten</p>
+          <h2 id="deviceDialogTitle">Gerät</h2>
+          <p class="dialog-context" id="deviceDialogContext"></p>
+        </div>
+        <button type="button" class="icon-btn" id="deviceDialogClose" aria-label="Schließen">
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15" /></svg>
+        </button>
+      </div>
+      <div class="device-dialog-layout">
+        <div class="device-deck is-large" id="deviceDialogDeck"></div>
+        <aside class="device-dialog-editor">
+          <div id="fkeyEditor">
+            <p class="eyebrow">Ausgewählte Taste</p>
+            <h3 id="selectedButton">F1</h3>
+            <label class="field">
+              <span>Funktion</span>
+              <select id="buttonFunction">
+                <option value="">Nicht belegt</option>
+                <option value="sends-on-fader">Sends on Fader</option>
+                <option value="monitor-dim">Monitor-Dim</option>
+              </select>
+            </label>
+            <label class="field" id="buttonAuxField">
+              <span>Aux-Ziel</span>
+              <select id="buttonAux"></select>
+            </label>
+            <label class="field" id="buttonMonitorField" hidden>
+              <span>Monitor</span>
+              <select id="buttonMonitor"></select>
+            </label>
+            <p class="form-message" id="buttonHint" role="status"></p>
+          </div>
+          <p class="form-message" id="deviceStripHint" role="status"></p>
+        </aside>
+      </div>
+    </dialog>
+
+    <dialog id="channelDialog" class="channel-dialog" aria-labelledby="channelDialogTitle">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">Festes Ziel</p>
+          <h2 id="channelDialogTitle">Ziel wählen</h2>
+          <p class="dialog-context" id="channelDialogContext"></p>
+        </div>
+        <button type="button" class="icon-btn" id="channelDialogClose" aria-label="Schließen">
+          <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15" /></svg>
+        </button>
+      </div>
+      <label class="search-field">
+        <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12.5 12.5 4 4" /></svg>
+        <input id="channelSearch" type="search" placeholder="Eingang oder Bus suchen …" autocomplete="off" spellcheck="false" />
+      </label>
+      <div class="channel-list" id="channelList" role="listbox" aria-label="Fairlight-Kanäle"></div>
+      <div class="dialog-footer">
+        <button type="button" class="btn btn-ghost" id="channelClear">Frei lassen</button>
+        <span class="dialog-hint" id="channelHint"></span>
+      </div>
+    </dialog>
+
+    <div class="toast-region" id="toastRegion" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

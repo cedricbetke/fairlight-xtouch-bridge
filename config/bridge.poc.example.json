@@ -1,0 +1,47 @@
+{
+  "fairlight": {
+    "host": "127.0.0.1",
+    "port": 9000,
+    "requestTimeoutMs": 2000,
+    "reconnectAttempts": -1
+  },
+  "midi": {
+    "rescanIntervalMs": 2000,
+    "requireAllDevices": false,
+    "devices": [
+      {
+        "role": "main",
+        "enabled": true,
+        "input": { "name": "X-Touch", "occurrence": 0 },
+        "output": { "name": "X-Touch", "occurrence": 0 }
+      }
+    ]
+  },
+  "mapping": {
+    "bankStep": 24,
+    "singleChannel": 1,
+    "singleChannelName": null,
+    "master": {
+      "enabled": false,
+      "busType": "main",
+      "busIndex": 1
+    },
+    "sendsOnFader": {
+      "enabled": false,
+      "busIndex": 1
+    },
+    "buttonAssignments": {}
+  },
+  "safety": {
+    "requireTouchForWrites": true,
+    "alignMotorsOnStart": true,
+    "alignMotorsOnBankChange": true,
+    "allowedWriteChannels": [1],
+    "allowedWriteBuses": [],
+    "allowedWriteMonitors": [],
+    "maxWritesPerSecond": 10,
+    "writeExpiryMs": 250,
+    "feedbackEpsilonDb": 0.05
+  },
+  "logLevel": "debug"
+}
