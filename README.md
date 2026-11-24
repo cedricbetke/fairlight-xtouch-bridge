@@ -1,5 +1,7 @@
 # Fairlight X-Touch Bridge
 
+[![CI](https://github.com/cedricbetke/fairlight-xtouch-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/cedricbetke/fairlight-xtouch-bridge/actions/workflows/ci.yml)
+
 A control bridge between Behringer X-Touch control surfaces and Blackmagic Design **Fairlight Live**. The bridge translates MIDI from the X-Touch (Mackie Control / MC mode) into Fairlight's Ember+ interface and back, so faders, mutes, pan, meters, channel names and a few function keys work on the physical surface.
 
 The bridge carries **control data only**. It does not process or route audio and does not change the Fairlight audio routing.
@@ -77,6 +79,8 @@ Nothing is written to Fairlight unless you pass `--arm-writes` **and** the targe
 | [Contributing](CONTRIBUTING.md) | Project layout, local tests, and guidelines for changes |
 
 Protocol references: [Ember+ API](docs/protocols/Fairlight_Live_EmberPlus_API.md) · [X-Touch USB](docs/protocols/XTouch_USB_MCU_Referenz.md) · [X-Touch Ethernet](docs/protocols/XTouch_Ethernet_MCU_Referenz.md) · [Extender USB](docs/protocols/XTouch_Extender_USB_MCU_Referenz.md) · [Extender Ethernet](docs/protocols/XTouch_Extender_Ethernet_MCU_Referenz.md)
+
+Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Safety model
 
