@@ -1,0 +1,98 @@
+{
+  "fairlight": {
+    "host": "127.0.0.1",
+    "port": 9000,
+    "requestTimeoutMs": 2000,
+    "reconnectAttempts": -1
+  },
+  "midi": {
+    "rescanIntervalMs": 2000,
+    "requireAllDevices": false,
+    "devices": [
+      {
+        "role": "main",
+        "enabled": true,
+        "input": { "name": "X-Touch", "occurrence": 0 },
+        "output": { "name": "X-Touch", "occurrence": 0 }
+      },
+      {
+        "role": "extender1",
+        "enabled": true,
+        "transport": "network",
+        "network": { "host": "192.168.1.29", "port": 5004 }
+      },
+      {
+        "role": "extender2",
+        "enabled": true,
+        "transport": "network",
+        "network": { "host": "192.168.1.30", "port": 5004 }
+      }
+    ]
+  },
+  "mapping": {
+    "bankStep": 24,
+    "singleChannel": null,
+    "singleChannelName": null,
+    "master": {
+      "enabled": true,
+      "busType": "main",
+      "busIndex": 1
+    },
+    "sendsOnFader": {
+      "enabled": false,
+      "busIndex": 1
+    },
+    "buttonAssignments": {},
+    "layout": {
+      "order": ["main", "extender1", "extender2"],
+      "surfaces": {
+        "main": {
+          "mode": "fixed",
+          "fixedTargets": [
+            { "kind": "channel", "channel": 1 },
+            { "kind": "channel", "channel": 2 },
+            { "kind": "channel", "channel": 3 },
+            { "kind": "channel", "channel": 4 },
+            { "kind": "channel", "channel": 5 },
+            { "kind": "channel", "channel": 6 },
+            { "kind": "channel", "channel": 7 },
+            { "kind": "channel", "channel": 8 }
+          ]
+        },
+        "extender1": { "mode": "banking" },
+        "extender2": { "mode": "banking" }
+      }
+    }
+  },
+  "lcd": {
+    "colorsEnabled": true,
+    "line1": "custom",
+    "line2": "type-number",
+    "palette": {
+      "channel": "white",
+      "main": "red",
+      "sub": "blue",
+      "aux": "cyan",
+      "mixm": "magenta",
+      "mtx": "yellow",
+      "vca": "green"
+    },
+    "overrides": []
+  },
+  "safety": {
+    "requireTouchForWrites": true,
+    "alignMotorsOnStart": true,
+    "alignMotorsOnBankChange": true,
+    "allowedWriteChannels": [
+      1, 2, 3, 4, 5, 6, 7, 8,
+      9, 10, 11, 12, 13, 14, 15, 16,
+      17, 18, 19, 20, 21, 22, 23, 24
+    ],
+    "allowedWriteBuses": ["main:1"],
+    "allowedWriteMonitors": [],
+    "maxWritesPerSecond": 20,
+    "writeExpiryMs": 250,
+    "feedbackEpsilonDb": 0.05
+  },
+  "logLevel": "info"
+}

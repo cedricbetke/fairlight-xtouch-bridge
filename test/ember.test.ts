@@ -64,6 +64,12 @@ describe("Ember+ Fairlight client", () => {
       assert.equal(snapshot.buses.filter((bus) => bus.type === "main").length, 2);
       assert.equal(snapshot.buses.filter((bus) => bus.type === "aux").length, 2);
       assert.equal(snapshot.buses.filter((bus) => bus.type === "vca").length, 2);
+      const mainBus = snapshot.buses.find((bus) => bus.type === "main" && bus.index === 1);
+      assert.equal(mainBus?.meterDb, -6);
+      assert.equal(mainBus?.integratedLufs, -23);
+      const auxBus = snapshot.buses.find((bus) => bus.type === "aux" && bus.index === 1);
+      assert.equal(auxBus?.meterDb, null);
+      assert.equal(auxBus?.integratedLufs, null);
       assert.ok(events.some((event) => event.type === "connected"));
 
       const confirmedLevel = await client.setChannelLevel(1, -6);
@@ -296,6 +302,108 @@ describe("Ember+ Fairlight client", () => {
     }
   });
 
+  it("reads and subscribes to the on-air parameter without writing to it", { timeout: 30_000 }, async () => {
+    const port = await freePort();
+    const provider = new MockEmberProvider({ port, channelCount: 2, logger });
+    await provider.start();
+    const client = new EmberFairlightClient({
+      host: "127.0.0.1",
+      port,
+      requestTimeoutMs: 3000,
+      reconnectAttempts: 0,
+      autoReconnect: false,
+      logger,
+    });
+    const events: FairlightEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    try {
+      await client.connect();
+      assert.equal(client.snapshot().onAir, false);
+
+      assert.equal(provider.updateOnAir(true), true);
+      await waitFor(() => client.snapshot().onAir === true, "pushed on-air value");
+      const systemEvents = events.filter(
+        (event): event is Extract<FairlightEvent, { type: "system" }> => event.type === "system",
+      );
+      assert.ok(systemEvents.some((event) => event.onAir === true));
+
+      const levelBefore = client.snapshot().channels[0]?.levelDb;
+      await client.setChannelLevel(1, levelBefore === -6 ? -5 : -6);
+      assert.equal(client.snapshot().onAir, true);
+    } finally {
+      await client.disconnect();
+      assert.equal(client.snapshot().onAir, null);
+      const unknownIndex = events.findLastIndex((event) => event.type === "system" && event.onAir === null);
+      const disconnectedIndex = events.findLastIndex((event) => event.type === "disconnected");
+      assert.ok(unknownIndex >= 0 && unknownIndex < disconnectedIndex);
+      await provider.stop();
+    }
+  });
+
+  it("reports an unknown on-air state when the provider has no on-air path", { timeout: 30_000 }, async () => {
+    const port = await freePort();
+    const provider = new MockEmberProvider({ port, channelCount: 2, logger, withOnAir: false });
+    await provider.start();
+    const client = new EmberFairlightClient({
+      host: "127.0.0.1",
+      port,
+      requestTimeoutMs: 3000,
+      reconnectAttempts: 0,
+      autoReconnect: false,
+      logger,
+    });
+    try {
+      await client.connect();
+      assert.equal(client.snapshot().onAir, null);
+      assert.equal(provider.updateOnAir(true), false);
+    } finally {
+      await client.disconnect();
+      await provider.stop();
+    }
+  });
+
+  it("receives pushed bus meter and integrated loudness values", { timeout: 30_000 }, async () => {
+    const port = await freePort();
+    const provider = new MockEmberProvider({ port, channelCount: 4, logger });
+    await provider.start();
+    const client = new EmberFairlightClient({
+      host: "127.0.0.1",
+      port,
+      requestTimeoutMs: 3000,
+      reconnectAttempts: 0,
+      autoReconnect: false,
+      logger,
+      subscribeMeters: true,
+    });
+    const events: FairlightEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    try {
+      await client.connect();
+      const mainBus = () =>
+        client.snapshot().buses.find((bus) => bus.type === "main" && bus.index === 1);
+      assert.equal(mainBus()?.integratedLufs, -23);
+      events.length = 0;
+
+      assert.equal(
+        provider.updateBusMeters("main", 1, { integratedLufs: -18.4, meterDb: -2.5 }),
+        true,
+      );
+      await waitFor(() => mainBus()?.integratedLufs === -18.4, "pushed integrated loudness");
+      assert.equal(mainBus()?.meterDb, -2.5);
+
+      const busEvents = events.flatMap((event) =>
+        event.type === "bus" && event.bus.type === "main" && event.bus.index === 1
+          ? [event.changed]
+          : [],
+      );
+      assert.ok(busEvents.some((changed) => changed.includes("integrated")));
+      assert.ok(busEvents.some((changed) => changed.includes("meter")));
+    } finally {
+      await client.disconnect().catch(() => undefined);
+      await provider.stop().catch(() => undefined);
+    }
+  });
+
   it("reconnects with fresh subscriptions after a provider restart", { timeout: 30_000 }, async () => {
     const port = await freePort();
     let provider = new MockEmberProvider({ port, channelCount: 24, logger });
@@ -320,10 +428,12 @@ describe("Ember+ Fairlight client", () => {
         "disconnect event",
         5000,
       );
+      assert.equal(client.snapshot().onAir, null);
 
       provider = new MockEmberProvider({ port, channelCount: 24, logger });
       await provider.start();
       await waitFor(() => events.filter((event) => event.type === "connected").length >= 2, "reconnect", 15_000);
+      assert.equal(client.snapshot().onAir, false);
 
       provider.updateChannel(1, { levelDb: -35 });
       await waitFor(() => client.snapshot().channels[0]?.levelDb === -35, "push after reconnect");

@@ -2,6 +2,16 @@
 
 This guide is for testing with real hardware. On 22 Nov 2026, tests 0–11 were run in a test show on a studio Mac with an X-Touch and two extenders: faders, mutes, master, banking, hotplug, Fairlight reconnect, structure changes and LCD channel names work. Continuous operation, sleep/wake and launchd remain pending. Please document results and deviations.
 
+## Remaining acceptance run (recommended order)
+
+The following blocks are still open. Run them in this order and stop if a block fails:
+
+1. **Extender identity and USB replug** — tests 0, 10 and 15. Confirm the mapping after every replug. A changed duplicate port list locks both extenders until the bridge restarts.
+2. **Ethernet / RTP-MIDI** — test 18, first with one unit, then with a USB main and two Ethernet extenders. If Ethernet is part of the setup, this block is a must-have.
+3. **Motors and displays** — tests 5, 11, 11b and 16: pan rings, meters, LCD colors and line modes, the ten-digit display, on-air badge.
+4. **Buses, sends and monitor controls in a test show** — tests 6, 8, 12, 13, 13b and 14. Use a show with an aux, a fixed bus and monitor paths.
+5. **Long-running operation and service** — test 17, then a multi-hour run, sleep/wake and launchd.
+
 ## Preparation
 
 - Start Fairlight Live 1.1.1 and load the test show.
@@ -288,6 +298,36 @@ Note: `safety.allowedWriteChannels` in the example covers channels 1–24. To se
 
 Device bytes: main `0x14`, both extenders `0x15`. With other firmware they may differ; in that case verify with an LCD test.
 
+## Test 11b: Main display
+
+This test is optional for the core workflow but required before trusting the on-air mode on stage. The software part is already covered by automated tests against a virtual MIDI backend; this run only checks the real hardware.
+
+Prerequisite: only the bridge opens the main X-Touch MIDI output. Extenders are not affected.
+
+1. On the settings page, open the main unit and set **Main display** to **Visible channels**. Save and restart the bridge.
+   - Expected: the ten digits show the visible channel range, for example `1  8` for the first bank, and `25  32` after one **BANK right**.
+2. Set **Main display** to **Automatic: bank and aux**, enable *Sends on fader* for an aux and restart.
+   - Expected: the main mix shows the channel range; **SEND** shows the aux number (for example `03`), **PAN** returns to the channel range.
+3. Set **Main display** to **Time** and restart.
+   - Expected: the display shows the local time of the Mac, for example `14` in the first group, `35.` in the second and `08.` in the third. The values advance every second.
+4. Set **Main display** to **On air (experimental)**, toggle the on-air state in Fairlight and restart beforehand.
+   - Expected: `ON AIR` is clearly distinguishable from `OFF AIR`; an unknown state (Fairlight disconnected) shows no digits.
+   - If the words are hard to read, leave this mode off and note the result. It is the reason the mode is marked experimental.
+5. Set **Main display** to **Fairlight measurement**, choose **Headroom to 0 dB** and a bus with signal. Save and restart.
+   - Expected: the digits show the reserve to 0 dB, for example `3.2` for a peak of −3.2 dB. It must never show a negative value.
+6. Switch the measurement to **Integrated loudness** and a main bus.
+   - Expected: the display shows the loudness with one decimal. Check whether the minus sign is clearly visible; if not, note it and keep this mode out of live use.
+7. Leave the measurement visible and press **BANK left** twice.
+   - Expected: the digits keep showing the measurement and are not overwritten by a bank range.
+8. Disconnect Fairlight.
+   - Expected: the display clears after the connection is lost (except in time mode).
+9. Disconnect and reconnect the main unit's USB cable.
+   - Expected: after the device is online again, the complete frame is rewritten; no stale digits remain.
+10. Stop the bridge.
+    - Expected: the display is cleared while the MIDI output is still open.
+
+Document any deviation: firmware, which characters are visible (dot, `-`, letters) and whether the digits need a repeated write. Do **not** treat a passing automated test as hardware confirmation.
+
 ## Test 12: Sends on Fader
 
 Prerequisite: the show has an aux (e.g. Aux 2) with assigned channel sends, and the configuration contains `"sendsOnFader": { "enabled": true, "busIndex": 2 }`. The affected channels must be listed in `allowedWriteChannels`.
@@ -358,6 +398,76 @@ Prerequisite: on the settings page, **F3** on the main unit is assigned to **Mon
 6. Check with a show without monitor paths.
    - Expected: `/api/state` reports no monitors; a saved Monitor-Dim assignment is retained and the key remains ineffective.
 
+## Test 15: Duplicate extender port change
+
+Prerequisite: two extenders with the same port name are online and assigned to `extender1` and `extender2`, writes and motors are armed.
+
+1. Unplug one extender.
+   - Expected: the bridge logs `midi.duplicate_ports_changed` and reports both extenders as offline with a reason ending in `restart the bridge`.
+   - Expected: the main unit keeps working; its faders, mutes and motors are unaffected.
+2. Move the faders on the remaining extender and press its keys.
+   - Expected: no Fairlight write, no motor command and no LCD update for either extender.
+3. Reconnect the extender.
+   - Expected: both extenders stay locked until the bridge is restarted. This is intended.
+4. Restart the bridge with both extenders connected.
+   - Expected: both extenders come online again. Confirm the order with a fader test before writing to the show.
+5. Repeat with the other extender unplugged first.
+   - Expected: the same lock.
+
+Record: which role was locked, the exact log reason, and whether the main unit stayed responsive throughout.
+
+## Test 16: On-air badge (read-only)
+
+1. Run `npm run dev -- discover --config config/bridge.json`.
+   - Expected: the output contains `On air: yes`, `no` or `unknown`.
+2. Open the settings page while the bridge runs and check the badge in the header.
+   - Expected: **ON AIR** when the show is on air, **OFF AIR** otherwise. The badge never changes the state.
+3. Switch the show on air and off air in Fairlight.
+   - Expected: the badge follows within a few seconds without reloading the page.
+4. Quit Fairlight or disable Ember+.
+   - Expected: the badge shows **Unbekannt** as soon as the connection drops. It never shows **OFF AIR** by inference.
+5. Restart Fairlight.
+   - Expected: the badge stays **Unbekannt** until a fresh value arrives, then shows the confirmed state.
+
+## Test 17: Soak and full-stack endurance (hardware-free)
+
+This test runs the whole software path — virtual surfaces, the real Ember+ client over TCP and the mock provider — but no real MIDI ports and no real Fairlight. It is the preparation for a multi-hour hardware run, not a replacement.
+
+1. `npm test`
+   - Expected: all tests pass, including the full-stack endurance suite (banking, feedback, delayed confirmation, provider restart, stale-write rejection, duplicate-port quarantine).
+2. `npm run dev -- soak --minutes 30`
+   - Expected: a start line naming the mock provider and virtual surfaces, a status line every 10 seconds, and a final `Soak summary: ok ...` with elapsed time, operations, writes, reconnects and RSS.
+   - Expected: `pending` and `inFlight` are empty at the end.
+   - Exit code 1 means an invariant failed (stale write after reconnect, stuck pending/in-flight write, MIDI output to an offline role). Keep the full output.
+3. For the multi-hour run, use `--minutes 180` or more and keep the output and the warning/error log.
+   - Expected: no memory climb that keeps growing after the first minutes, no repeated reconnect or timeout storms.
+
+The soak cannot prove CoreMIDI port identity, motor behavior or real Fairlight push behavior. Those stay in tests 0–16.
+
+## Test 18: Ethernet / RTP-MIDI
+
+Prerequisite: at least one unit is configured with `"transport": "network"` and set to `MC` → `NETWORK` → RTP **SLAVE**. Use `config/bridge.network.example.json` as a template.
+
+1. `npm run dev -- midi list --config config/bridge.network.json`.
+   - Expected: the network device is listed with `network=host:port (RTP-MIDI, data port port+1)`.
+2. `npm run dev -- midi monitor --device <role> --duration 20 --config config/bridge.network.json`.
+   - Expected: `Online: RTP-MIDI host:port`, then fader, touch and key messages when you operate the unit.
+   - Expected: no messages from another unit; each session is separate.
+3. `npm run dev -- doctor --config config/bridge.network.json`.
+   - Expected: `OK` for each network device with `RTP-MIDI session accepted at host:port`.
+   - If the bridge is running and the unit refuses a second session, stop the bridge and repeat.
+4. Start the bridge with `--arm-writes --arm-motor` and check the fader test from test 5 on the network unit.
+   - Expected: faders, touch protection, motor feedback, mute LEDs and LCD text work as over USB.
+5. Pull the Ethernet cable or power off the unit.
+   - Expected: the bridge reports the role offline, stops writing and does not move its motors; the other surfaces keep their channels.
+6. Reconnect the unit.
+   - Expected: the session is re-established automatically, the bank mapping stays, and the motors align to the confirmed Fairlight values. No old fader value is written.
+7. Run a mixed setup with the main unit on USB and two extenders over Ethernet.
+   - Expected: banking covers all three surfaces; each extender keeps its eight channels when the other one drops.
+8. Review the log for `rtp_midi.*` events and note any retry storm.
+
+Record: unit firmware, RTP role (SLAVE), control/data ports, firewall changes, and whether LCD SysEx and motor feedback arrived reliably.
+
 ## Acceptance criteria
 
 For live approval, at least the following must be met:
@@ -366,6 +476,10 @@ For live approval, at least the following must be met:
 - No unintended fader movement except the documented startup, bank and structure alignment; during the structure check the motors stay locked.
 - No write without touch and without arming/allowlist.
 - Monitor-Dim writes only when armed and in `allowedWriteMonitors`; the LED shows only the confirmed dim state and goes off after a disconnect.
+- After a duplicate MIDI port list changes, no MIDI, motor or Fairlight write reaches the affected roles until the bridge restarts; the main unit with a unique name stays usable.
+- On-air shows only a freshly confirmed value; a disconnect or missing `system/onair` path shows **Unbekannt**, never **Off Air** by inference.
+- A network unit that drops keeps its role and bank; after reconnecting, no stale value is sent and the motors align to fresh Fairlight values.
+- No two configured devices use the same `network.host:port`, and the data port (control port + 1) is free.
 - After an unconfirmed write, the strip stays locked until a fresh Fairlight value is available; a new touch gesture is then required.
 - After a structure message, the bridge locks immediately; after successful re-detection, the structure is adopted automatically (no restart), unless the single-channel name check fails.
 - Fader curve within the accepted technical tolerance.

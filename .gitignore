@@ -1,5 +1,6 @@
 node_modules/
 dist/
+release/
 config/bridge.json
 config/bridge.poc.json
 config/bridge.demo.json

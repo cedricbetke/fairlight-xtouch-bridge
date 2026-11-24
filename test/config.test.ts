@@ -232,6 +232,20 @@ describe("configuration", () => {
     assert.deepEqual(config.midi.devices[1]?.network, { host: "192.168.1.30", port: 5010 });
   });
 
+  it("allows network devices without USB port selectors", () => {
+    const config = parseConfig({
+      midi: {
+        devices: [
+          { role: "main", transport: "network", network: { host: "10.0.0.5" } },
+          { role: "extender1", transport: "network", network: { host: "10.0.0.6", port: 5010 } },
+        ],
+      },
+      logLevel: "error",
+    });
+    assert.deepEqual(config.midi.devices[0]?.input, { name: "10.0.0.5:5004", occurrence: 0 });
+    assert.deepEqual(config.midi.devices[1]?.output, { name: "10.0.0.6:5010", occurrence: 0 });
+  });
+
   it("rejects network devices without a host", () => {
     assert.throws(
       () =>
@@ -678,6 +692,235 @@ describe("configuration", () => {
   it("exposes an unchanged default object for read-only discovery", () => {
     assert.equal(DEFAULT_CONFIG.fairlight.port, 9000);
     assert.deepEqual(DEFAULT_CONFIG.midi.devices, []);
+  });
+
+  it("defaults the main display to off and parses its mode and scope", () => {
+    const defaults = parseConfig(minimal());
+    assert.deepEqual(defaults.midi.devices[0]?.mainDisplay, {
+      mode: "off",
+      scope: "surface",
+      meter: null,
+    });
+
+    const configured = parseConfig(
+      minimal({
+        midi: {
+          devices: [
+            {
+              role: "main",
+              input: { name: "X-Touch", occurrence: 0 },
+              output: { name: "X-Touch", occurrence: 0 },
+              mainDisplay: { mode: "channels", scope: "main" },
+            },
+          ],
+        },
+      }),
+    );
+    assert.deepEqual(configured.midi.devices[0]?.mainDisplay, {
+      mode: "channels",
+      scope: "main",
+      meter: null,
+    });
+
+    assert.throws(
+      () =>
+        parseConfig(
+          minimal({
+            midi: {
+              devices: [
+                {
+                  role: "main",
+                  input: { name: "X-Touch", occurrence: 0 },
+                  output: { name: "X-Touch", occurrence: 0 },
+                  mainDisplay: { mode: "bogus" },
+                },
+              ],
+            },
+          }),
+        ),
+      ConfigError,
+    );
+    assert.throws(
+      () =>
+        parseConfig(
+          minimal({
+            midi: {
+              devices: [
+                {
+                  role: "main",
+                  input: { name: "X-Touch", occurrence: 0 },
+                  output: { name: "X-Touch", occurrence: 0 },
+                  mainDisplay: { mode: "channels", scope: "bogus" },
+                },
+              ],
+            },
+          }),
+        ),
+      ConfigError,
+    );
+  });
+
+  it("parses a main display meter source", () => {
+    const configured = parseConfig(
+      minimal({
+        midi: {
+          devices: [
+            {
+              role: "main",
+              input: { name: "X-Touch", occurrence: 0 },
+              output: { name: "X-Touch", occurrence: 0 },
+              mainDisplay: {
+                mode: "meter",
+                meter: {
+                  measurement: "headroom",
+                  target: { kind: "bus", busType: "aux", index: 2 },
+                },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    assert.deepEqual(configured.midi.devices[0]?.mainDisplay.meter, {
+      measurement: "headroom",
+      target: { kind: "bus", busType: "aux", index: 2 },
+    });
+
+    const fallback = parseConfig(
+      minimal({
+        midi: {
+          devices: [
+            {
+              role: "main",
+              input: { name: "X-Touch", occurrence: 0 },
+              output: { name: "X-Touch", occurrence: 0 },
+              mainDisplay: { mode: "meter" },
+            },
+          ],
+        },
+      }),
+    );
+    assert.deepEqual(fallback.midi.devices[0]?.mainDisplay.meter, {
+      measurement: "loudness",
+      target: { kind: "bus", busType: "main", index: 1 },
+    });
+
+    assert.throws(
+      () =>
+        parseConfig(
+          minimal({
+            midi: {
+              devices: [
+                {
+                  role: "main",
+                  input: { name: "X-Touch", occurrence: 0 },
+                  output: { name: "X-Touch", occurrence: 0 },
+                  mainDisplay: {
+                    mode: "meter",
+                    meter: { measurement: "bogus", target: { kind: "bus", busType: "main", index: 1 } },
+                  },
+                },
+              ],
+            },
+          }),
+        ),
+      ConfigError,
+    );
+    assert.throws(
+      () =>
+        parseConfig(
+          minimal({
+            midi: {
+              devices: [
+                {
+                  role: "main",
+                  input: { name: "X-Touch", occurrence: 0 },
+                  output: { name: "X-Touch", occurrence: 0 },
+                  mainDisplay: {
+                    mode: "meter",
+                    meter: { measurement: "loudness", target: { kind: "channel", channel: 1 } },
+                  },
+                },
+              ],
+            },
+          }),
+        ),
+      ConfigError,
+    );
+    // Integrated loudness is only documented for main buses.
+    assert.throws(
+      () =>
+        parseConfig(
+          minimal({
+            midi: {
+              devices: [
+                {
+                  role: "main",
+                  input: { name: "X-Touch", occurrence: 0 },
+                  output: { name: "X-Touch", occurrence: 0 },
+                  mainDisplay: {
+                    mode: "meter",
+                    meter: {
+                      measurement: "loudness",
+                      target: { kind: "bus", busType: "aux", index: 1 },
+                    },
+                  },
+                },
+              ],
+            },
+          }),
+        ),
+      ConfigError,
+    );
+  });
+
+  it("rejects an active main display on an extender", () => {
+    assert.throws(
+      () =>
+        parseConfig(
+          minimal({
+            midi: {
+              devices: [
+                {
+                  role: "main",
+                  input: { name: "X-Touch", occurrence: 0 },
+                  output: { name: "X-Touch", occurrence: 0 },
+                },
+                {
+                  role: "extender1",
+                  kind: "extender",
+                  input: { name: "X-Touch Extender", occurrence: 0 },
+                  output: { name: "X-Touch Extender", occurrence: 0 },
+                  mainDisplay: { mode: "channels" },
+                },
+              ],
+            },
+          }),
+        ),
+      ConfigError,
+    );
+
+    const allowed = parseConfig(
+      minimal({
+        midi: {
+          devices: [
+            {
+              role: "main",
+              input: { name: "X-Touch", occurrence: 0 },
+              output: { name: "X-Touch", occurrence: 0 },
+            },
+            {
+              role: "extender1",
+              kind: "extender",
+              input: { name: "X-Touch Extender", occurrence: 0 },
+              output: { name: "X-Touch Extender", occurrence: 0 },
+              mainDisplay: { mode: "off" },
+            },
+          ],
+        },
+      }),
+    );
+    assert.equal(allowed.midi.devices[1]?.mainDisplay.mode, "off");
   });
 
   it("parses per-device encoder and meter options", () => {

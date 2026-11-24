@@ -1,10 +1,13 @@
 import {
   BUTTON_IDS,
+  defaultMainDisplayConfig,
   mainRoleOf,
   type BridgeConfig,
   type BusType,
   type ButtonId,
   type EncoderMode,
+  type MainDisplayConfig,
+  type MainDisplayScope,
   type RuntimeArming,
   type SurfaceRole,
 } from "../config.js";
@@ -38,11 +41,19 @@ import {
   MCU_LCD_DEVICE_XTOUCH,
   MCU_NOTE_PAN,
   MCU_NOTE_SEND,
+  MCU_STATUS_CONTROL_CHANGE,
   type McuEvent,
 } from "../mcu/codec.js";
 import { buttonLabel, buttonNote } from "../mcu/buttons.js";
 import { DEFAULT_FADER_LAW } from "../mcu/faderLaw.js";
+import {
+  blankSegmentCells,
+  MCU_SEGMENT_CC_TIME_BASE,
+  segmentUpdatePlan,
+  type SegmentCell,
+} from "../mcu/segmentDisplay.js";
 import type { MidiDeviceEvent } from "../midi/deviceManager.js";
+import { mainDisplayCells, type MainDisplayMeterReading } from "./mainDisplay.js";
 
 export interface MidiSink {
   send(role: SurfaceRole, message: number[]): boolean;
@@ -134,6 +145,8 @@ export class SyncEngine {
   readonly #arming: RuntimeArming;
   readonly #roles: SurfaceRole[];
   readonly #mainRole: SurfaceRole;
+  readonly #mainDisplay: MainDisplayConfig;
+  readonly #mainDeviceEnabled: boolean;
   readonly #stripStates = new Map<string, StripState>();
   readonly #channels = new Map<number, ChannelState>();
   readonly #buses = new Map<string, BusState>();
@@ -144,6 +157,10 @@ export class SyncEngine {
   #sendStrips = new Map<string, StripRef[]>();
   #sendAux: number | null = null;
   #fairlightConnected = false;
+  #onAir: boolean | null = null;
+  /** Last successfully written seven-segment frame, left to right. */
+  #segmentValues: number[] | null = null;
+  #displayTimer: NodeJS.Timeout | undefined;
   #structureLocked = false;
   #structureLockSource: "identity" | "structure" | null = null;
   #structureSignature = "";
@@ -166,7 +183,7 @@ export class SyncEngine {
     const deviceOrder = options.config.midi.devices.map((device) => device.role);
     const layoutOrder = options.config.mapping.layout?.order ?? deviceOrder;
     const enabledRoles = options.config.midi.devices
-      .filter((device) => device.enabled && device.transport !== "network")
+      .filter((device) => device.enabled)
       .map((device) => device.role);
     const orderedEnabled = layoutOrder.filter((role) => enabledRoles.includes(role));
     for (const role of enabledRoles) {
@@ -179,6 +196,9 @@ export class SyncEngine {
       mainRole: this.#mainRole,
     });
     this.#arming = { ...options.arming };
+    const mainDevice = options.config.midi.devices.find((device) => device.role === this.#mainRole);
+    this.#mainDisplay = mainDevice?.mainDisplay ?? defaultMainDisplayConfig();
+    this.#mainDeviceEnabled = mainDevice?.enabled ?? true;
     this.#ensureStripStates();
   }
 
@@ -191,6 +211,11 @@ export class SyncEngine {
       this.#intoConnectedState();
       this.#applySnapshot(this.#fairlight.snapshot(), true);
       this.#alignMotors("bridge started", this.#config.safety.alignMotorsOnStart);
+    }
+    if (this.#mainDisplay.mode === "clock" && this.#mainDeviceEnabled) {
+      this.#displayTimer = setInterval(() => this.#refreshMainDisplay("clock"), 1000);
+      this.#displayTimer.unref();
+      this.#refreshMainDisplay("clock started");
     }
     this.#logger.info("sync.started", { arming: this.#arming, mapping: this.#mapping.describe() });
   }
@@ -205,6 +230,11 @@ export class SyncEngine {
       clearTimeout(this.#writeTimer);
       this.#writeTimer = undefined;
     }
+    if (this.#displayTimer) {
+      clearInterval(this.#displayTimer);
+      this.#displayTimer = undefined;
+    }
+    this.#clearMainDisplay("bridge stopped");
   }
 
   setArming(arming: RuntimeArming): void {
@@ -234,7 +264,12 @@ export class SyncEngine {
       this.#repaintLeds(event.role);
       this.#repaintRingsForRole(event.role);
       this.#refreshDisplaysForRole(event.role);
-      if (event.role === this.#mainRole) this.#updateAssignLeds();
+      if (event.role === this.#mainRole) {
+        this.#updateAssignLeds();
+        // A reconnected unit shows stale digits, so rewrite the full frame.
+        this.#segmentValues = null;
+        this.#refreshMainDisplay("device online");
+      }
       this.#alignMotorsForRole(event.role, "device online");
       this.#logger.info("sync.device_online", { role: event.role });
       return;
@@ -580,6 +615,7 @@ export class SyncEngine {
     this.#repaintAllRings();
     this.#clearAllMeters();
     this.#refreshDisplays();
+    this.#refreshMainDisplay("bank changed");
     this.#alignMotors("bank changed", this.#config.safety.alignMotorsOnBankChange);
     this.#logger.info("sync.bank_changed", {
       direction,
@@ -690,6 +726,7 @@ export class SyncEngine {
     }
     this.#rebuildBindingIndexes();
     this.#refreshDisplays();
+    this.#refreshMainDisplay("fader mode changed");
     this.#updateAssignLeds();
     this.#alignMotors("fader mode changed", this.#config.safety.alignMotorsOnBankChange);
     this.#logger.info("sync.fader_mode_changed", {
@@ -704,11 +741,13 @@ export class SyncEngine {
     switch (event.type) {
       case "connected":
         this.#fairlightConnected = true;
+        this.#onAir = event.snapshot.onAir;
         this.#session += 1;
         this.#intoConnectedState();
         this.#applySnapshot({
           revision: event.snapshot.revision,
           discoveredAt: event.snapshot.discoveredAt,
+          onAir: event.snapshot.onAir,
           channels: event.snapshot.channels,
           buses: event.snapshot.buses,
           monitors: event.snapshot.monitors,
@@ -734,6 +773,8 @@ export class SyncEngine {
         this.#clearAllMeters();
         this.#monitors.clear();
         this.#updateAssignLeds();
+        this.#onAir = null;
+        this.#refreshMainDisplay("fairlight disconnected");
         this.#logger.warn("sync.fairlight_disconnected", { reason: event.reason });
         return;
       case "snapshot": {
@@ -748,9 +789,17 @@ export class SyncEngine {
         return;
       case "bus":
         this.#applyBusUpdate(event.bus, event.changed);
+        this.#refreshMeterDisplayForBus(event.bus, event.changed);
         return;
       case "monitor":
         this.#applyMonitorUpdate(event.monitor, event.changed);
+        return;
+      case "system":
+        // On-air stays read-only; it only feeds the optional display mode.
+        if (event.onAir !== this.#onAir) {
+          this.#onAir = event.onAir;
+          this.#refreshMainDisplay("on-air changed");
+        }
         return;
       case "structure-change-detected":
         this.#lockStructure(event.reason);
@@ -769,6 +818,7 @@ export class SyncEngine {
           if (state.touched) state.blocked = true;
         }
         this.#clearAllMeters();
+        this.#refreshMainDisplay("structure changed");
         this.#logger.warn("sync.structure_changed", { summary: event.summary });
         return;
       case "structure-revalidated":
@@ -826,12 +876,17 @@ export class SyncEngine {
   }
 
   #applySnapshot(snapshot: ReturnType<FairlightClient["snapshot"]>, resetArmed: boolean): void {
+    this.#onAir = snapshot.onAir;
     this.#channels.clear();
     for (const channel of snapshot.channels) this.#channels.set(channel.index, { ...channel });
     this.#buses.clear();
     for (const bus of snapshot.buses) this.#buses.set(busKey(bus.type, bus.index), { ...bus });
     this.#monitors.clear();
     for (const monitor of snapshot.monitors) this.#monitors.set(monitor.index, { ...monitor });
+    if (this.#sendAux !== null && !this.#buses.has(busKey("aux", this.#sendAux))) {
+      this.#logger.warn("sync.send_aux_missing", { aux: this.#sendAux, source: "snapshot" });
+      this.#sendAux = null;
+    }
     const maxChannel = snapshot.channels.reduce((max, channel) => Math.max(max, channel.index), 0);
     this.#mapping.setChannelCount(maxChannel);
     this.#structureSignature = snapshotSignature(snapshot);
@@ -852,6 +907,7 @@ export class SyncEngine {
     this.#repaintAllRings();
     this.#clearAllMeters();
     this.#refreshDisplays();
+    this.#refreshMainDisplay("snapshot");
     this.#updateAssignLeds();
     this.#logger.info("sync.snapshot_applied", {
       channels: snapshot.channels.length,
@@ -1209,6 +1265,90 @@ export class SyncEngine {
       }
       this.#midi.send(this.#mainRole, encodeLed(buttonNote(button), on));
     }
+  }
+
+  #refreshMainDisplay(reason: string): void {
+    // A disabled main unit has no output the bridge could address.
+    if (!this.#mainDeviceEnabled) return;
+    if (this.#mainDisplay.mode === "off" && this.#segmentValues === null) return;
+    const cells = mainDisplayCells({
+      config: this.#mainDisplay,
+      connected: this.#fairlightConnected,
+      sendAux: this.#sendAux,
+      visibleChannels: this.#visibleChannels(this.#mainDisplay.scope),
+      onAir: this.#onAir,
+      meter: this.#mainDisplayMeter(),
+      now: new Date(),
+    });
+    this.#writeMainDisplay(cells, reason);
+  }
+
+  #clearMainDisplay(reason: string): void {
+    // Without a cached frame there is nothing the bridge knows it wrote. Retrying
+    // here would also blank digits the user may have set by other means.
+    if (this.#segmentValues === null) return;
+    this.#writeMainDisplay(null, reason);
+  }
+
+  #writeMainDisplay(cells: readonly SegmentCell[] | null, reason: string): void {
+    const target = cells ?? blankSegmentCells();
+    const plan = segmentUpdatePlan(target, this.#segmentValues, MCU_SEGMENT_CC_TIME_BASE);
+    if (plan.updates.length === 0) {
+      this.#segmentValues = cells === null ? null : this.#segmentValues;
+      return;
+    }
+    const values = this.#segmentValues ? [...this.#segmentValues] : plan.values.slice();
+    let success = true;
+    for (const update of plan.updates) {
+      const sent = this.#midi.send(this.#mainRole, [
+        MCU_STATUS_CONTROL_CHANGE,
+        update.cc,
+        update.value,
+      ]);
+      if (sent) values[update.index] = update.value;
+      else success = false;
+    }
+    this.#segmentValues = success && cells !== null ? values : null;
+    this.#logger.debug("sync.main_display_updated", {
+      reason,
+      mode: this.#mainDisplay.mode,
+      scope: this.#mainDisplay.scope,
+      digits: plan.updates.length,
+      success,
+    });
+  }
+
+  #refreshMeterDisplayForBus(bus: BusState, changed: BusField[]): void {
+    const meter = this.#mainDisplay.meter;
+    if (this.#mainDisplay.mode !== "meter" || !meter) return;
+    if (meter.target.busType !== bus.type || meter.target.index !== bus.index) return;
+    if (!changed.includes("meter") && !changed.includes("integrated")) return;
+    this.#refreshMainDisplay("meter update");
+  }
+
+  #mainDisplayMeter(): MainDisplayMeterReading | null {
+    const meter = this.#mainDisplay.meter;
+    if (!meter) return null;
+    const bus = this.#buses.get(busKey(meter.target.busType, meter.target.index));
+    return {
+      measurement: meter.measurement,
+      value:
+        meter.measurement === "loudness"
+          ? (bus?.integratedLufs ?? null)
+          : (bus?.meterDb ?? null),
+    };
+  }
+
+  #visibleChannels(scope: MainDisplayScope): number[] {
+    const roles = scope === "main" ? [this.#mainRole] : this.#roles;
+    const channels: number[] = [];
+    for (const role of roles) {
+      for (let strip = 0; strip < 8; strip += 1) {
+        const target = this.#mapping.resolve(role, strip);
+        if (target?.kind === "channel") channels.push(target.channel);
+      }
+    }
+    return channels;
   }
 
   #repaintAllLeds(): void {

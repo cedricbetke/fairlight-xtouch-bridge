@@ -1,11 +1,13 @@
 import { after, before, describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { parseConfig } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
+import { MockRtpMidiPeer } from "../src/midi/mockRtpMidiPeer.js";
 import { DEMO_BUSES, DEMO_CHANNELS, DEMO_MONITORS, createDemoConfig } from "../src/settings/demo.js";
 import { SettingsServer, type SettingsServerAddress } from "../src/settings/server.js";
 
@@ -46,6 +48,23 @@ async function post(path: string, body: unknown, headers: Record<string, string>
   });
 }
 
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        reject(new Error("Could not allocate a test port"));
+        return;
+      }
+      const { port } = address;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
 before(async () => {
   const directory = mkdtempSync(join(tmpdir(), "ember-settings-"));
   const configPath = join(directory, "bridge.demo.json");
@@ -81,8 +100,8 @@ describe("settings server", () => {
       error: string | null;
     };
     assert.equal(ports.error, null);
-    assert.ok(ports.inputs.length >= 3);
-    assert.ok(ports.outputs.length >= 3);
+    assert.equal(ports.inputs.length, 3);
+    assert.equal(ports.outputs.length, 3);
 
     const response = await fetch(`${env.address.url}/api/state`);
     assert.equal(response.status, 200);
@@ -106,8 +125,15 @@ describe("settings server", () => {
         }>;
       };
       midi: { inputs: unknown[]; outputs: unknown[] };
+      onAir: boolean | null;
+      fairlight: { host: string; port: number; onAir: boolean | null; connected: boolean };
     };
     assert.equal(state.demo, true);
+    assert.equal(state.onAir, null);
+    assert.equal(state.fairlight.onAir, null);
+    assert.equal(state.fairlight.connected, false);
+    assert.equal(state.fairlight.host, "127.0.0.1");
+    assert.equal(typeof state.fairlight.port, "number");
     assert.equal(state.channels.length, DEMO_CHANNELS.length);
     assert.equal(state.buses.length, DEMO_BUSES.length);
     assert.equal(state.monitors.length, DEMO_MONITORS.length);
@@ -133,6 +159,11 @@ describe("settings server", () => {
     assert.deepEqual(stripChannels(extender2), [17, 18, 19, 20, 21, 22, 23, 24]);
     assert.ok(state.midi.inputs.length >= 3);
     assert.ok(state.midi.outputs.length >= 3);
+
+    const onAirResponse = await fetch(`${env.address.url}/api/onair`);
+    assert.equal(onAirResponse.status, 200);
+    const onAir = (await onAirResponse.json()) as { onAir: boolean | null; connected: boolean };
+    assert.deepEqual(onAir, { onAir: null, connected: false });
   });
 
   it("reorders banking slices with the physical device order", async () => {
@@ -415,6 +446,89 @@ describe("settings server", () => {
     assert.equal(preserved.lcd.overrides.length, 1);
   });
 
+  it("saves the main display setting and preserves it when an older client omits it", async () => {
+    const state = (await (await fetch(`${env.address.url}/api/state`)).json()) as {
+      layout: { order: string[] };
+      devices: Array<Record<string, unknown>>;
+    };
+    const devices = state.devices.map((device) =>
+      device["role"] === "main"
+        ? { ...device, mainDisplay: { mode: "auto", scope: "main" } }
+        : device,
+    );
+    const response = await post("/api/save", {
+      layout: state.layout,
+      fairlight: { host: "127.0.0.1", port: 9000 },
+      devices,
+    });
+    assert.equal(response.status, 200);
+    const saved = parseConfig(JSON.parse(readFileSync(env.configPath, "utf8")) as unknown);
+    assert.deepEqual(saved.midi.devices.find((device) => device.role === "main")?.mainDisplay, {
+      mode: "auto",
+      scope: "main",
+      meter: null,
+    });
+
+    const legacyDevices = state.devices.map(({ mainDisplay: _omitted, ...rest }) => rest);
+    const legacy = await post("/api/save", {
+      layout: state.layout,
+      fairlight: { host: "127.0.0.1", port: 9000 },
+      devices: legacyDevices,
+    });
+    assert.equal(legacy.status, 200);
+    const preserved = parseConfig(JSON.parse(readFileSync(env.configPath, "utf8")) as unknown);
+    assert.deepEqual(preserved.midi.devices.find((device) => device.role === "main")?.mainDisplay, {
+      mode: "auto",
+      scope: "main",
+      meter: null,
+    });
+
+    const invalid = await post("/api/save", {
+      layout: state.layout,
+      fairlight: { host: "127.0.0.1", port: 9000 },
+      devices: state.devices.map((device) =>
+        device["role"] === "main"
+          ? { ...device, mainDisplay: { mode: "bogus" } }
+          : device,
+      ),
+    });
+    assert.equal(invalid.status, 400);
+  });
+
+  it("saves a main display meter source", async () => {
+    const state = (await (await fetch(`${env.address.url}/api/state`)).json()) as {
+      layout: { order: string[] };
+      devices: Array<Record<string, unknown>>;
+    };
+    const devices = state.devices.map((device) =>
+      device["role"] === "main"
+        ? {
+            ...device,
+            mainDisplay: {
+              mode: "meter",
+              meter: {
+                measurement: "headroom",
+                target: { kind: "bus", busType: "aux", index: 2 },
+              },
+            },
+          }
+        : device,
+    );
+    const response = await post("/api/save", {
+      layout: state.layout,
+      fairlight: { host: "127.0.0.1", port: 9000 },
+      devices,
+    });
+    assert.equal(response.status, 200);
+    const saved = parseConfig(JSON.parse(readFileSync(env.configPath, "utf8")) as unknown);
+    const display = saved.midi.devices.find((device) => device.role === "main")?.mainDisplay;
+    assert.equal(display?.mode, "meter");
+    assert.deepEqual(display?.meter, {
+      measurement: "headroom",
+      target: { kind: "bus", busType: "aux", index: 2 },
+    });
+  });
+
   it("saves the sends-on-fader aux and preserves it when an older client omits it", async () => {
     const state = (await (await fetch(`${env.address.url}/api/state`)).json()) as {
       layout: { order: string[] };
@@ -672,6 +786,153 @@ describe("settings server dynamic surfaces", () => {
       assert.equal(refreshed.roleLabels["extender3"], "Extender 3");
     } finally {
       await server.stop();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("settings server demo MIDI ports", () => {
+  it("lists only configured ports and adds one when a surface reserves it", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ember-settings-ports-"));
+    const configPath = join(directory, "bridge.demo.json");
+    const server = new SettingsServer({
+      configPath,
+      config: createDemoConfig(),
+      demo: true,
+      port: 0,
+      logger,
+      autoDiscover: false,
+    });
+    const address = await server.start();
+    try {
+      const initial = (await (await fetch(`${address.url}/api/midi/ports`)).json()) as {
+        inputs: unknown[];
+        outputs: unknown[];
+        error: string | null;
+      };
+      assert.equal(initial.error, null);
+      assert.equal(initial.inputs.length, 3);
+      assert.equal(initial.outputs.length, 3);
+
+      const response = await fetch(`${address.url}/api/midi/ports`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "X-Touch Extender" }),
+      });
+      assert.equal(response.status, 200);
+      const reserved = (await response.json()) as {
+        input: { name: string; occurrence: number };
+        output: { name: string; occurrence: number };
+        ports: { inputs: unknown[]; outputs: unknown[] };
+      };
+      assert.deepEqual(reserved.input, { name: "X-Touch Extender", occurrence: 2 });
+      assert.deepEqual(reserved.output, { name: "X-Touch Extender", occurrence: 2 });
+      assert.equal(reserved.ports.inputs.length, 4);
+      assert.equal(reserved.ports.outputs.length, 4);
+
+      const state = (await (await fetch(`${address.url}/api/state`)).json()) as {
+        devices: Array<Record<string, unknown>>;
+      };
+      const devices = state.devices.map((device) => ({
+        role: device["role"],
+        kind: device["kind"],
+        name: device["name"],
+        enabled: device["enabled"],
+        transport: device["transport"],
+        input: device["input"],
+        output: device["output"],
+        network: device["network"],
+        encoder: device["encoder"],
+        meters: device["meters"],
+      }));
+      devices.push({
+        role: "extender3",
+        kind: "extender",
+        name: null,
+        enabled: true,
+        transport: "usb",
+        input: reserved.input,
+        output: reserved.output,
+        network: null,
+        encoder: "pan",
+        meters: true,
+      });
+      const layout = {
+        order: ["main", "extender1", "extender2", "extender3"],
+        surfaces: {
+          main: { mode: "banking", fixedTargets: [] },
+          extender1: { mode: "banking", fixedTargets: [] },
+          extender2: { mode: "banking", fixedTargets: [] },
+          extender3: { mode: "banking", fixedTargets: [] },
+        },
+      };
+      const save = await fetch(`${address.url}/api/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ layout, devices }),
+      });
+      assert.equal(save.status, 200);
+
+      const after = (await (await fetch(`${address.url}/api/midi/ports`)).json()) as {
+        inputs: unknown[];
+        outputs: unknown[];
+      };
+      assert.equal(after.inputs.length, 4);
+      assert.equal(after.outputs.length, 4);
+    } finally {
+      await server.stop();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("settings server network transport", () => {
+  it("tests a real RTP-MIDI session and reports a rejected invitation", { timeout: 20_000 }, async () => {
+    const port = await freePort();
+    const peer = new MockRtpMidiPeer({ port, logger });
+    await peer.start();
+    const directory = mkdtempSync(join(tmpdir(), "ember-settings-network-"));
+    const configPath = join(directory, "bridge.json");
+    const config = parseConfig({
+      midi: {
+        devices: [{ role: "main", transport: "network", network: { host: "127.0.0.1", port } }],
+      },
+      mapping: { master: { enabled: false } },
+      logLevel: "error",
+    });
+    const server = new SettingsServer({
+      configPath,
+      config,
+      demo: false,
+      port: 0,
+      logger,
+      autoDiscover: false,
+    });
+    const address = await server.start();
+    try {
+      const accepted = await fetch(`${address.url}/api/network/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "main", host: "127.0.0.1", port }),
+      });
+      assert.equal(accepted.status, 200);
+      const body = (await accepted.json()) as { ok: boolean; simulated: boolean; message: string };
+      assert.equal(body.ok, true);
+      assert.equal(body.simulated, false);
+      assert.match(body.message, /angenommen/);
+
+      await peer.stop();
+      const rejected = await fetch(`${address.url}/api/network/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "main", host: "127.0.0.1", port }),
+      });
+      assert.equal(rejected.status, 409);
+      const failure = (await rejected.json()) as { error: string };
+      assert.match(failure.error, /nicht möglich/);
+    } finally {
+      await server.stop();
+      await peer.stop();
       rmSync(directory, { recursive: true, force: true });
     }
   });

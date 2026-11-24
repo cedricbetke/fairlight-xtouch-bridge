@@ -70,6 +70,7 @@ interface BusEntry {
   nameNode: EmberNodeLike | null;
   panNode: EmberNodeLike | null;
   meterNode: EmberNodeLike | null;
+  integratedNode: EmberNodeLike | null;
 }
 
 interface MonitorEntry {
@@ -147,6 +148,32 @@ function monitorRootMatches(node: EmberNodeLike): boolean {
   return identifier.startsWith("monitor") || description.startsWith("monitor");
 }
 
+/**
+ * Tolerant label match used for the on-air path: lowercases and drops separators
+ * so `onAir`, `onair`, `on-air` and `ON_AIR` are all accepted.
+ */
+function normaliseLabel(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function labelMatches(node: EmberNodeLike, wanted: string): boolean {
+  const key = normaliseLabel(wanted);
+  return (
+    normaliseLabel(node.contents.identifier ?? "") === key ||
+    normaliseLabel(node.contents.description ?? "") === key
+  );
+}
+
+function findSystemRoot(roots: EmberNodeLike[]): EmberNodeLike | null {
+  return roots.find((root) => isParameterLikeRoot(root) && labelMatches(root, "system")) ?? null;
+}
+
+function findOnAirParameter(parent: EmberNodeLike): EmberNodeLike | null {
+  return (
+    childNodes(parent).find((child) => isParameter(child) && labelMatches(child, "onair")) ?? null
+  );
+}
+
 function readNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "boolean") return value ? 1 : 0;
@@ -196,23 +223,17 @@ function findNode(parent: EmberNodeLike, identifier: string): EmberNodeLike | nu
   );
 }
 
-function findMeterParameter(parent: EmberNodeLike): EmberNodeLike | null {
-  const direct = findParameter(parent, "meter");
+/** Finds a meter parameter either directly or inside a `meters` container. */
+function findMetersParameter(parent: EmberNodeLike, identifier: string): EmberNodeLike | null {
+  const direct = findParameter(parent, identifier);
   if (direct) return direct;
-  const metersNode = childNodes(parent).find(
-    (child) =>
-      !isParameter(child) &&
-      ((child.contents.identifier ?? "").toLowerCase() === "meters" ||
-        (child.contents.description ?? "").toLowerCase() === "meters"),
-  );
+  const metersNode = findNode(parent, "meters");
   if (!metersNode) return null;
-  const nested = findParameter(metersNode, "meter");
-  if (nested) return nested;
-  for (const child of childNodes(metersNode)) {
-    if (!isParameter(child)) continue;
-    if ((child.contents.identifier ?? "").toLowerCase() === "meter") return child;
-  }
-  return null;
+  return findParameter(metersNode, identifier);
+}
+
+function findMeterParameter(parent: EmberNodeLike): EmberNodeLike | null {
+  return findMetersParameter(parent, "meter");
 }
 
 function channelName(node: EmberNodeLike, nameNode: EmberNodeLike | null, index: number): string {
@@ -305,6 +326,8 @@ export class EmberFairlightClient implements FairlightClient {
   #channels = new Map<number, ChannelEntry>();
   #buses = new Map<string, BusEntry>();
   #monitors = new Map<number, MonitorEntry>();
+  #onAir: boolean | null = null;
+  #onAirNode: EmberNodeLike | null = null;
   #lastSnapshot: FairlightSnapshot | null = null;
 
   constructor(options: EmberFairlightOptions) {
@@ -345,6 +368,8 @@ export class EmberFairlightClient implements FairlightClient {
     this.#subscriptionKeys.clear();
     this.#structureDetected = false;
     this.#structureReason = null;
+    this.#applyOnAir(null);
+    this.#onAirNode = null;
     const wasConnected = client !== undefined;
     if (client) {
       const transport = client as unknown as { _client?: { handleClose?: () => void } };
@@ -367,6 +392,7 @@ export class EmberFairlightClient implements FairlightClient {
     return {
       revision: this.#revision,
       discoveredAt: new Date().toISOString(),
+      onAir: this.#onAir,
       channels: [...this.#channels.values()].map((entry) => cloneChannel(entry.state)).sort((a, b) => a.index - b.index),
       buses: [...this.#buses.values()]
         .map((entry) => cloneBus(entry.state))
@@ -627,6 +653,8 @@ export class EmberFairlightClient implements FairlightClient {
       } catch {}
     }
     this.#logger.warn("fairlight.disconnected", { reason });
+    this.#applyOnAir(null);
+    this.#onAirNode = null;
     this.#emit({ type: "disconnected", reason });
     if (this.#options.autoReconnect) this.#scheduleReconnect();
   }
@@ -787,6 +815,27 @@ export class EmberFairlightClient implements FairlightClient {
     return next;
   }
 
+  async #discoverOnAir(roots: EmberNodeLike[], session: number): Promise<void> {
+    const systemRoot = findSystemRoot(roots);
+    if (!systemRoot) {
+      this.#onAirNode = null;
+      this.#applyOnAir(null);
+      return;
+    }
+    let systemContainer: EmberNodeLike;
+    try {
+      systemContainer = await this.#loadNode(systemRoot, session);
+    } catch (error) {
+      this.#logger.warn("fairlight.system_root_failed", { error });
+      this.#onAirNode = null;
+      this.#applyOnAir(null);
+      return;
+    }
+    const node = findOnAirParameter(systemContainer);
+    this.#onAirNode = node;
+    this.#applyOnAir(node ? readBoolean(node.contents.value) : null);
+  }
+
   async #performDiscoverInner(session: number, initial: boolean): Promise<void> {
     const client = this.#requireClient();
     const previous = this.#lastSnapshot;
@@ -803,6 +852,9 @@ export class EmberFairlightClient implements FairlightClient {
     if (!channelRoot) {
       throw new FairlightError("CHANNEL_ROOT_NOT_FOUND", "Fairlight Ember+ tree has no channel root");
     }
+
+    this.#assertSession(session);
+    await this.#discoverOnAir(roots, session);
 
     const channelContainer = await this.#loadNode(channelRoot, session);
     const channelNodes = childNodes(channelContainer)
@@ -878,11 +930,22 @@ export class EmberFairlightClient implements FairlightClient {
         try {
           const loaded = await this.#loadNode(busNode, session);
           const paramsParent = hasChildren(loaded) ? loaded : busNode;
+          // A `meters` container is a nested node whose parameters only appear
+          // after its own directory request.
+          const metersNode = findNode(paramsParent, "meters");
+          if (metersNode) {
+            try {
+              await this.#loadNode(metersNode, session);
+            } catch (error) {
+              this.#logger.warn("fairlight.bus_meters_failed", { type, bus: index, error });
+            }
+          }
           const levelNode = findParameter(paramsParent, "level");
           const muteNode = findParameter(paramsParent, "mute");
           const nameNode = findParameter(paramsParent, "name");
           const panNode = findParameter(paramsParent, "pan");
           const meterNode = findMeterParameter(paramsParent);
+          const integratedNode = findMetersParameter(paramsParent, "integrated");
           const state: BusState = {
             type,
             index,
@@ -891,6 +954,7 @@ export class EmberFairlightClient implements FairlightClient {
             muted: muteNode ? readBoolean(muteNode.contents.value) : null,
             pan: panNode ? readNumber(panNode.contents.value) : null,
             meterDb: meterNode ? readNumber(meterNode.contents.value) : null,
+            integratedLufs: integratedNode ? readNumber(integratedNode.contents.value) : null,
             writableLevel: levelNode !== null && isWritable(levelNode),
             writableMute: muteNode !== null && isWritable(muteNode),
             writablePan: panNode !== null && isWritable(panNode),
@@ -903,6 +967,7 @@ export class EmberFairlightClient implements FairlightClient {
             nameNode,
             panNode,
             meterNode,
+            integratedNode,
           });
         } catch (error) {
           this.#logger.warn("fairlight.bus_discovery_failed", { type, bus: index, error });
@@ -963,6 +1028,17 @@ export class EmberFairlightClient implements FairlightClient {
       );
     }
 
+    if (this.#onAirNode) {
+      await this.#subscribe(
+        client,
+        "param:system:onair",
+        this.#onAirNode,
+        () => this.#refreshOnAir(),
+        session,
+        "param:system:onair",
+      );
+    }
+
     for (const [index, entry] of this.#channels) {
       await this.#subscribeParameter(client, session, index, "level", entry.levelNode);
       await this.#subscribeParameter(client, session, index, "mute", entry.muteNode);
@@ -1000,7 +1076,22 @@ export class EmberFairlightClient implements FairlightClient {
       await this.#subscribeBusParameter(client, session, entry.state.type, entry.state.index, "mute", entry.muteNode);
       await this.#subscribeBusParameter(client, session, entry.state.type, entry.state.index, "pan", entry.panNode);
       if (this.#options.subscribeMeters) {
-        await this.#subscribeBusMeterParameter(client, session, entry.state.type, entry.state.index, entry.meterNode);
+        await this.#subscribeBusMeterParameter(
+          client,
+          session,
+          entry.state.type,
+          entry.state.index,
+          "meter",
+          entry.meterNode,
+        );
+        await this.#subscribeBusMeterParameter(
+          client,
+          session,
+          entry.state.type,
+          entry.state.index,
+          "integrated",
+          entry.integratedNode,
+        );
       }
       await this.#subscribe(
         client,
@@ -1080,17 +1171,18 @@ export class EmberFairlightClient implements FairlightClient {
     session: number,
     type: BusType,
     index: number,
+    field: "meter" | "integrated",
     node: EmberNodeLike | null,
   ): Promise<void> {
     if (!node) return;
     const key = busKey(type, index);
     await this.#subscribe(
       client,
-      `param:bus:${key}:meter`,
+      `param:bus:${key}:${field}`,
       node,
-      () => this.#refreshBusField(type, index, "meter"),
+      () => this.#refreshBusField(type, index, field),
       session,
-      `param:bus:${key}:meter`,
+      `param:bus:${key}:${field}`,
     );
   }
 
@@ -1216,6 +1308,9 @@ export class EmberFairlightClient implements FairlightClient {
     } else if (field === "meter" && entry.meterNode) {
       const meter = readNumber(entry.meterNode.contents.value);
       if (meter !== null) this.#applyBusField(entry, "meter", meter, true);
+    } else if (field === "integrated" && entry.integratedNode) {
+      const integrated = readNumber(entry.integratedNode.contents.value);
+      if (integrated !== null) this.#applyBusField(entry, "integrated", integrated, true);
     }
   }
 
@@ -1242,6 +1337,10 @@ export class EmberFairlightClient implements FairlightClient {
       const meter = readNumber(entry.meterNode.contents.value);
       if (meter !== null) this.#applyBusField(entry, "meter", meter, true);
     }
+    if (entry.integratedNode) {
+      const integrated = readNumber(entry.integratedNode.contents.value);
+      if (integrated !== null) this.#applyBusField(entry, "integrated", integrated, true);
+    }
   }
 
   #refreshMonitorField(index: number, field: MonitorField): void {
@@ -1261,6 +1360,11 @@ export class EmberFairlightClient implements FairlightClient {
       const dimmed = readBoolean(entry.dimNode.contents.value);
       if (dimmed !== null) this.#applyMonitorField(entry, "dim", dimmed, true);
     }
+  }
+
+  #refreshOnAir(): void {
+    if (!this.#onAirNode) return;
+    this.#applyOnAir(readBoolean(this.#onAirNode.contents.value));
   }
 
   async #subscribe(
@@ -1295,6 +1399,14 @@ export class EmberFairlightClient implements FairlightClient {
     } catch (error) {
       this.#logger.warn("fairlight.subscription_failed", { node: label, error });
     }
+  }
+
+  #applyOnAir(value: boolean | null): void {
+    if (this.#onAir === value) return;
+    this.#onAir = value;
+    this.#revision += 1;
+    this.#logger.debug("fairlight.on_air_updated", { onAir: value });
+    this.#emit({ type: "system", onAir: value });
   }
 
   #applyChannelField(entry: ChannelEntry, field: ChannelField, value: number | boolean | string, fromProvider: boolean): void {
@@ -1368,6 +1480,12 @@ export class EmberFairlightClient implements FairlightClient {
       case "meter":
         if (typeof value === "number" && entry.state.meterDb !== value) {
           entry.state.meterDb = value;
+          changed = true;
+        }
+        break;
+      case "integrated":
+        if (typeof value === "number" && entry.state.integratedLufs !== value) {
+          entry.state.integratedLufs = value;
           changed = true;
         }
         break;

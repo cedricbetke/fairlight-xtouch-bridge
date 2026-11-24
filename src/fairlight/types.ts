@@ -32,6 +32,8 @@ export interface BusState {
   muted: boolean | null;
   pan: number | null;
   meterDb: number | null;
+  /** Integrated loudness in LUFS. Only main buses with a `meters` container expose it. */
+  integratedLufs: number | null;
   writableLevel: boolean;
   writableMute: boolean;
   writablePan: boolean;
@@ -51,13 +53,15 @@ export interface MonitorState {
 export interface FairlightSnapshot {
   revision: number;
   discoveredAt: string;
+  /** Fairlight's on-air state. `null` means unknown. */
+  onAir: boolean | null;
   channels: ChannelState[];
   buses: BusState[];
   monitors: MonitorState[];
 }
 
 export type ChannelField = "level" | "mute" | "name" | "pan" | "meter" | "send";
-export type BusField = "level" | "mute" | "name" | "pan" | "meter";
+export type BusField = "level" | "mute" | "name" | "pan" | "meter" | "integrated";
 export type MonitorField = "level" | "mute" | "dim" | "name";
 
 export interface StructureChangeSummary {
@@ -72,6 +76,7 @@ export type FairlightEvent =
   | { type: "connected"; snapshot: FairlightSnapshot }
   | { type: "disconnected"; reason: string }
   | { type: "snapshot"; snapshot: FairlightSnapshot }
+  | { type: "system"; onAir: boolean | null }
   | { type: "channel"; channel: ChannelState; changed: ChannelField[] }
   | { type: "bus"; bus: BusState; changed: BusField[] }
   | { type: "monitor"; monitor: MonitorState; changed: MonitorField[] }
@@ -116,6 +121,7 @@ export function cloneMonitor(monitor: MonitorState): MonitorState {
 export function cloneSnapshot(snapshot: FairlightSnapshot): FairlightSnapshot {
   return {
     ...snapshot,
+    onAir: snapshot.onAir,
     channels: snapshot.channels.map(cloneChannel),
     buses: snapshot.buses.map(cloneBus),
     monitors: snapshot.monitors.map(cloneMonitor),

@@ -320,6 +320,33 @@ h3 {
   border-color: var(--accent-line);
 }
 
+.badge-onair {
+  color: var(--faint);
+  background: var(--inset);
+  border-color: var(--line);
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.badge-onair[data-state="on"] {
+  color: #ffd7da;
+  background: rgba(229, 105, 122, 0.16);
+  border-color: rgba(229, 105, 122, 0.42);
+}
+
+.badge-onair[data-state="off"] {
+  color: var(--text);
+  background: var(--card-soft);
+  border-color: var(--line-strong);
+}
+
+.badge-onair[data-state="unknown"] {
+  color: var(--faint);
+  background: var(--inset);
+  border-color: var(--line);
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -431,6 +458,90 @@ h3 {
 
 .connection-panel {
   padding: 18px 22px 18px;
+}
+
+.app-panel {
+  padding: 18px 22px;
+}
+
+.app-panel[hidden] {
+  display: none;
+}
+
+.app-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.app-status-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+}
+
+.app-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.app-line strong {
+  color: var(--text);
+  font-weight: 550;
+}
+
+.app-arming {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.app-safety {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.app-safety .eyebrow {
+  margin: 0;
+}
+
+.app-safety-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.app-arming .eyebrow {
+  margin: 0;
+}
+
+.app-hint {
+  max-width: 70ch;
+  color: var(--faint);
+  font-size: 0.76rem;
+}
+
+.app-error {
+  margin-top: 10px;
+  color: var(--danger);
+  font-size: 0.8rem;
+}
+
+.app-error[hidden] {
+  display: none;
+}
+
+@media (min-width: 900px) {
+  .app-status-list {
+    gap: 10px 36px;
+  }
 }
 
 .panel-heading {
@@ -2417,6 +2528,52 @@ button.strip:focus-visible {
 .device-dialog-editor .field select {
   min-width: 0;
   width: 100%;
+}
+
+/* Seven-segment main display inside the device deck SVG */
+.deck-seg {
+  fill: #201408;
+}
+
+.deck-seg.is-lit {
+  fill: #ffb648;
+}
+
+.deck-seg-dot {
+  fill: #201408;
+}
+
+.deck-seg-dot.is-lit {
+  fill: #ffb648;
+}
+
+/* Simulation controls under the main display settings */
+.main-display-sim {
+  display: grid;
+  gap: 8px;
+}
+
+.segment-sim {
+  display: flex;
+  gap: 6px;
+}
+
+.segment-sim .btn {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+}
+
+.sim-segmented {
+  display: flex;
+  width: 100%;
+}
+
+.sim-segmented button {
+  flex: 1;
+  min-width: 0;
+  padding: 0 6px;
 }
 
 @media (max-width: 980px) {

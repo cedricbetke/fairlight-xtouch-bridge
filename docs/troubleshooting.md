@@ -8,6 +8,52 @@ npm run dev -- doctor --config config/bridge.json
 
 `doctor` sends no MIDI, writes nothing to Fairlight and does not move motors, so it is safe to run at any time.
 
+## Desktop app
+
+The app keeps its own log in the user data directory:
+
+| Platform | Log |
+|---|---|
+| macOS | `~/Library/Application Support/Fairlight X-Touch Bridge/logs/bridge.log` |
+| Windows | `%APPDATA%\Fairlight X-Touch Bridge\logs\bridge.log` |
+| Linux | `~/.config/fairlight-xtouch-bridge/logs/bridge.log` |
+
+Set `FAIRLIGHT_BRIDGE_LOG_LEVEL=debug` before starting the app for more detail.
+
+### The settings page does not open
+
+- Open it from the tray or menu bar icon with **Einstellungen öffnen**.
+- If port `8787` is already in use, the app picks a free port and logs `app.settings_port_busy`. Always use the tray item, not an old bookmark.
+- A second app launch focuses the running instance instead of starting a second bridge.
+
+### No tray or menu bar icon appears
+
+Some Linux desktops do not provide a tray. The bridge keeps running; the app entry opens the settings page again. To stop the running instance from a terminal:
+
+```bash
+"/opt/Fairlight X-Touch Bridge/fairlight-xtouch-bridge" --quit
+```
+
+The exact path depends on the installation.
+
+### The bridge does not start
+
+- The app section shows the reason, for example **Noch keine MIDI-Geräte eingerichtet.** Save a configuration with at least one enabled device.
+- On first start after installation there is no configuration yet; the settings page opens so you can create one.
+
+### Faders, mute or motors do nothing
+
+- Enable **Schreibzugriffe auf Fairlight erlauben** and, for motor movement, **Motoren bewegen** in the app section. Both are off after every app start.
+- Add the targets to **Schreibziele in der Konfiguration**; empty lists allow nothing.
+- Check the state lines in the app section: Fairlight must be connected and the X-Touch units must be online.
+
+### Autostart does nothing
+
+- Enable **Bridge bei der Anmeldung starten** in the app section or the tray menu; it is off by default and the installer does not turn it on.
+- Autostart starts the app without a browser window. Open the settings from the tray icon.
+- On Linux, check `~/.config/autostart/fairlight-xtouch-bridge.desktop`.
+- Turn autostart off before uninstalling, or remove the login item manually.
+
 ## MIDI
 
 ### A port is not found or `midi list` shows no match
@@ -29,6 +75,16 @@ To check:
 
 Re-check after you unplug and re-plug a unit, since the order can change.
 
+### Both extenders stop working after a USB replug
+
+This is the duplicate-name guard, not a port failure. macOS exposes no stable endpoint ID, so after a port list change the bridge cannot prove which physical unit a remaining port belongs to. As soon as the list for a shared name changes while the bridge runs, it locks **every** role using that name and logs `midi.duplicate_ports_changed`. The main unit, which has a unique port name, keeps working.
+
+1. Check the current order with `midi list` and `midi monitor` as described above.
+2. Restart the bridge. The restart is the confirmation step; a fresh start adopts the current order.
+3. Move one fader per extender and confirm that the intended channel responds before you write to Fairlight.
+
+A short USB glitch therefore needs an operator restart. This is deliberate: continuing with a shifted index could move the wrong channel. Unique port names are not affected.
+
 ### Extender disappears after a USB replug
 
 After a USB replug, macOS sometimes does not enumerate the extender again. Power-cycle the extender (switch it off and on). The bridge picks the device up again as soon as it appears. A cascade through the USB hub of an extender produced duplicate or silent MIDI ports during testing, so connect each unit to its own USB path.
@@ -48,6 +104,15 @@ The settings page shows input and output separately, with a reason in the summar
 
 A missing selection stays visible and is never silently switched to another device with the same name.
 
+### An Ethernet unit stays offline or reports a rejected session
+
+- The unit must be in `MC` → `NETWORK` mode with RTP **SLAVE**, not RTP MASTER or HUI.
+- Check `network.host` and `network.port`: the port must be the control port on the unit. The bridge also uses the next port (control port + 1), and both must be free and allowed through the firewall.
+- Do not run a second bridge, a DAW network MIDI session, or the settings-page connection test against the same unit at the same time. Many units accept only one session. The bridge logs `invitation rejected` when the peer refuses.
+- `midi monitor --device <role>` and `doctor` open a separate session. Stop the bridge first if the unit refuses the second session.
+- After a network drop, the bridge retries without a restart. The bank mapping stays in place; the unit shows up again as soon as it accepts a new invitation.
+- Ethernet **Find** is not implemented. Use the unit's display or its network configuration to identify it.
+
 ## Fairlight connection
 
 ### `discover` finds nothing, or the connection fails
@@ -65,6 +130,16 @@ A missing selection stays visible and is never silently switched to another devi
 ### The bridge keeps reconnecting
 
 This is expected while Fairlight is closed or restarting. Retries back off up to 10 seconds. Set `fairlight.reconnectAttempts` to a positive number if you want the bridge to give up after a fixed number of attempts. Otherwise it retries without limit.
+
+### The on-air badge shows "Unbekannt"
+
+The badge is read-only and never guesses. It shows **Unbekannt** (unknown) when:
+
+- the show has no `system/onair` parameter,
+- the bridge is not connected to Fairlight, or
+- the connection was just re-established and Fairlight has not yet reported a fresh value.
+
+Check `npm run dev -- discover --config config/bridge.json`: it prints `On air: yes|no|unknown`. If it prints `unknown`, the path is not present in that show. The bridge never derives on-air from another parameter.
 
 ### Channel numbers shifted after I changed the show
 

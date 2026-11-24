@@ -20,6 +20,7 @@ describe("i18n", () => {
     assert.equal(i18n.translate("LCD-Anzeige", "en"), "LCD display");
     assert.equal(i18n.translate("Alles gespeichert", "en"), "All saved");
     assert.equal(i18n.translate("Sprache", "en"), "Language");
+    assert.equal(i18n.translate("Unbekannt", "en"), "Unknown");
   });
 
   it("keeps German as the source language", () => {
@@ -49,6 +50,33 @@ describe("i18n", () => {
     assert.equal(i18n.translate("SEND ruft Drums als Aux-Mix auf. PAN schaltet zurück.", "en"), "SEND brings up Drums as the aux mix. PAN returns.");
     assert.equal(i18n.translate("MIDI-Ausgang „X-Touch INT“ wurde nicht gefunden.", "en"), "MIDI output “X-Touch INT” was not found.");
     assert.equal(i18n.translate("Demo · 24 Eingänge · 12 Busse", "en"), "Demo · 24 inputs · 12 buses");
+    assert.equal(
+      i18n.translate("Im Betrieb: Bankbereich; bei aktivem Sends on Fader Aux 03. Ohne Fairlight bleibt sie leer.", "en"),
+      "During operation: bank range; with sends on fader active, aux 03. It stays blank without Fairlight.",
+    );
+    assert.equal(
+      i18n.translate("Lokale Uhrzeit des Bridge-Rechners. Beispiel, nicht am Gerät geprüft.", "en"),
+      "Local time of the bridge host. Example, not verified on the device.",
+    );
+    assert.equal(
+      i18n.translate("Folgt der Bank-Vorschau. Am Gerät nicht geprüft.", "en"),
+      "Follows the bank preview. Not verified on the device.",
+    );
+    assert.equal(i18n.translate("Main Mix", "en"), "Main mix");
+    assert.equal(i18n.translate("Fairlight-Messwert", "en"), "Fairlight measurement");
+    assert.equal(i18n.translate("Integrierte Lautheit", "en"), "Integrated loudness");
+    assert.equal(i18n.translate("Pegelreserve bis 0 dB", "en"), "Headroom to 0 dB");
+    assert.equal(i18n.translate("Messwert", "en"), "Measurement");
+    assert.equal(i18n.translate("Quelle", "en"), "Source");
+    assert.equal(
+      i18n.translate(
+        "Pegelreserve bis 0 dB aus dem Spitzenpegel des gewählten Busses; ohne Messwert zeigt die Vorschau einen Beispielwert.",
+        "en",
+      ),
+      "Headroom to 0 dB from the peak level of the selected bus; without a reading the preview shows an example value.",
+    );
+    assert.equal(i18n.translate("Sends on Fader simulieren", "en"), "Simulate sends on fader");
+    assert.equal(i18n.translate("On-Air-Zustand simulieren", "en"), "Simulate the on-air state");
   });
 
   it("keeps channel names, bus codes and identifiers unchanged", () => {
@@ -79,6 +107,9 @@ describe("i18n", () => {
       "Encoder",
       "Banking",
       "Main",
+      "App",
+      "Bridge",
+      "X-Touch",
       "Sends on Fader",
       "Monitor-Dim",
       "Monitor",

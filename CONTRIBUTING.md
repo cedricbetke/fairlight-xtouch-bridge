@@ -19,6 +19,7 @@ Run the software without hardware:
 npm run dev -- simulate
 npm run settings:demo
 npm run dev -- mock-ember --port 19000
+npm run app          # desktop app from source
 ```
 
 ## Project layout
@@ -26,8 +27,10 @@ npm run dev -- mock-ember --port 19000
 See the [project layout in the README](README.md#project-layout). In short:
 
 - `src/`: TypeScript source. ES modules, compiled with `tsc` to `dist/`.
-- `test/`: unit and integration tests. Integration tests use local TCP connections to the mock Ember+ provider.
+- `src/app/`: Electron main process, tray, bridge lifecycle and autostart. Keep Electron-specific code out of `src/runtime/` and the settings server.
+- `test/`: unit and integration tests. Integration tests use local TCP connections to the mock Ember+ provider and local UDP sessions for AppleMIDI, including a full-stack endurance test and a mixed USB/Ethernet run. `npm run dev -- soak` runs the same stack for longer, hardware-free runs.
 - `web/`: settings page. Plain HTML, CSS and JavaScript without a build step.
+- `assets/`: app and tray icons, regenerated with `npm run icons`.
 - `config/`: example configurations. Do not put real show data or personal paths in them.
 - `docs/`: guides and references, written in English.
 
@@ -48,7 +51,8 @@ These rules protect live shows. Changes that weaken them need a clear justificat
 - Fairlight is the source of truth. LEDs and motor positions follow confirmed values, never the sent value alone.
 - Pending values expire, and structure changes, bank changes and disconnects discard them.
 - A failed or unconfirmed write locks the affected strip until a fresh value arrives.
-- `doctor` and the settings page must not write to Fairlight or move motors. The only MIDI the settings page sends is the SELECT blink from **Find**.
+- Roles that share a MIDI port name stay locked when that port list changes; only a restart re-binds them.
+- `doctor` and the settings page must not write to Fairlight or move motors. The only MIDI the settings page sends is the SELECT blink from **Find**. Reading on-air is allowed; switching it is not.
 
 ## Protocol and hardware changes
 
