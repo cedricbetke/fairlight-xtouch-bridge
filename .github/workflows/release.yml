@@ -46,7 +46,7 @@ jobs:
       matrix:
         include:
           - label: macOS (Apple Silicon)
-            os: macos-14
+            os: macos-15
             command: npx electron-builder --mac --arm64 --publish never
           - label: Windows (x64)
             os: windows-latest
