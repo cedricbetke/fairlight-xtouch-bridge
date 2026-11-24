@@ -7,6 +7,13 @@ import { resolvePort, type MidiPortsSnapshot } from "../midi/deviceManager.js";
 
 export type DoctorStatus = "ok" | "warn" | "fail";
 
+export interface DoctorNetworkProbe {
+  role: SurfaceRole;
+  endpoint: string;
+  ok: boolean;
+  reason: string | null;
+}
+
 export interface DoctorCheck {
   id: string;
   status: DoctorStatus;
@@ -25,6 +32,8 @@ export interface DoctorInput {
   port: number;
   /** Ports to inspect. `null` skips the MIDI check. */
   ports: MidiPortsSnapshot | { error: string } | null;
+  /** RTP-MIDI probe results per network device. `null` skips the network check. */
+  network?: DoctorNetworkProbe[] | null;
   /** Connected client or connect error. `null` skips the Fairlight check. */
   fairlight: { client: FairlightClient } | { error: string } | null;
 }
@@ -82,12 +91,31 @@ function checkMidi(input: DoctorInput, add: AddCheck): void {
 
   for (const device of enabled) {
     if (device.transport === "network") {
-      add(
-        "warn",
-        `midi.${device.role}`,
-        `${device.role}: network transport is configured but not implemented yet`,
-        { role: device.role, network: device.network },
-      );
+      const endpoint = device.network ? `${device.network.host}:${device.network.port}` : "missing endpoint";
+      const probe = input.network?.find((entry) => entry.role === device.role);
+      if (!input.network) {
+        add("warn", `midi.${device.role}`, `${device.role}: RTP-MIDI at ${endpoint} was not checked`, {
+          role: device.role,
+          network: device.network,
+        });
+      } else if (!probe) {
+        add("warn", `midi.${device.role}`, `${device.role}: RTP-MIDI at ${endpoint} was not probed`, {
+          role: device.role,
+          network: device.network,
+        });
+      } else if (probe.ok) {
+        add("ok", `midi.${device.role}`, `${device.role}: RTP-MIDI session accepted at ${endpoint}`, {
+          role: device.role,
+          network: device.network,
+        });
+      } else {
+        add(
+          "fail",
+          `midi.${device.role}`,
+          `${device.role}: RTP-MIDI session at ${endpoint} failed: ${probe.reason ?? "unknown"}. A running bridge may already hold the session.`,
+          { role: device.role, network: device.network, reason: probe.reason },
+        );
+      }
       continue;
     }
     const resolvedInput = resolvePort(inputs, device.input);
@@ -138,7 +166,7 @@ function checkMidi(input: DoctorInput, add: AddCheck): void {
     add(
       "warn",
       `midi.shared_name.${name}`,
-      `${roles.join(", ")} share the port name "${name}". Verify the occurrence order with a fader test.`,
+      `${roles.join(", ")} share the port name "${name}". A change to this port list locks these roles until the bridge restarts; verify the occurrence order with a fader test.`,
       { name, roles },
     );
   }
@@ -186,6 +214,7 @@ function checkFairlight(input: DoctorInput, add: AddCheck): void {
 
   checkSingleChannel(config, channels, add);
   checkMaster(config, buses, add);
+  checkMainDisplay(config, buses, add);
   checkFixedTargets(config, channels, buses, add);
   checkSendsOnFader(config, snapshot, buses, add);
   checkButtonAssignments(config, snapshot, buses, monitors, add);
@@ -256,6 +285,35 @@ function checkMaster(config: BridgeConfig, buses: Map<string, BusState>, add: Ad
     return;
   }
   add("ok", "fairlight.master", `Master ${key} (${bus.name}) is writable`, { bus: key });
+}
+
+function checkMainDisplay(config: BridgeConfig, buses: Map<string, BusState>, add: AddCheck): void {
+  const main = config.midi.devices.find((device) => device.kind === "main" && device.enabled);
+  const display = main?.mainDisplay;
+  if (!display || display.mode !== "meter" || !display.meter) return;
+  const { measurement, target } = display.meter;
+  const key = `${target.busType}:${target.index}`;
+  const bus = buses.get(key);
+  if (!bus) {
+    add("fail", "fairlight.main_display", `Main display: measurement bus ${key} was not found`, { bus: key });
+    return;
+  }
+  const value = measurement === "loudness" ? bus.integratedLufs : bus.meterDb;
+  if (value === null) {
+    add(
+      "warn",
+      "fairlight.main_display",
+      `Main display: ${key} (${bus.name}) does not provide the selected measurement`,
+      { bus: key, measurement },
+    );
+    return;
+  }
+  add(
+    "ok",
+    "fairlight.main_display",
+    `Main display: ${key} (${bus.name}) provides the ${measurement === "loudness" ? "integrated loudness" : "peak meter"}`,
+    { bus: key, measurement },
+  );
 }
 
 function checkFixedTargets(
@@ -434,7 +492,7 @@ function checkWriteAllowlists(
 function mappedTargets(config: BridgeConfig, channelCount: number): { channels: Set<number>; buses: Set<string> } {
   const roles: SurfaceRole[] = config.midi.devices.map((device) => device.role);
   const enabledRoles = config.midi.devices
-    .filter((device) => device.enabled && device.transport !== "network")
+    .filter((device) => device.enabled)
     .map((device) => device.role);
   const order = config.mapping.layout?.order ?? roles;
   const map = new ChannelMap(config.mapping, {

@@ -9,6 +9,9 @@ export interface DemoBus {
   type: BusType;
   index: number;
   name: string;
+  /** Sample readings for the preview; the real server includes live values. */
+  meterDb?: number | null;
+  integratedLufs?: number | null;
 }
 
 export interface DemoMonitor {
@@ -65,11 +68,11 @@ export const DEMO_CHANNELS: DemoChannel[] = DEMO_NAMES.map((name, index) => ({
 }));
 
 export const DEMO_BUSES: DemoBus[] = [
-  { type: "main", index: 1, name: "Main" },
-  { type: "aux", index: 1, name: "Kopfhörer" },
-  { type: "aux", index: 2, name: "Bühne" },
-  { type: "mtx", index: 1, name: "Stream" },
-  { type: "vca", index: 1, name: "Drums" },
+  { type: "main", index: 1, name: "Main", meterDb: -6, integratedLufs: -23.1 },
+  { type: "aux", index: 1, name: "Kopfhörer", meterDb: -12.4, integratedLufs: null },
+  { type: "aux", index: 2, name: "Bühne", meterDb: -4.2, integratedLufs: null },
+  { type: "mtx", index: 1, name: "Stream", meterDb: -2.1, integratedLufs: null },
+  { type: "vca", index: 1, name: "Drums", meterDb: null, integratedLufs: null },
 ];
 
 export const DEMO_MONITORS: DemoMonitor[] = [

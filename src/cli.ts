@@ -8,16 +8,19 @@ import { MockEmberProvider } from "./fairlight/mockProvider.js";
 import type { FairlightClient, FairlightSnapshot } from "./fairlight/types.js";
 import { createLogger, isLogLevel, type LogLevel } from "./logger.js";
 import { MidiDeviceManager, resolvePort, type MidiPortsSnapshot } from "./midi/deviceManager.js";
+import { EmptyMidiBackend } from "./midi/emptyBackend.js";
 import { NativeMidiBackend } from "./midi/realBackend.js";
+import { probeRtpMidi, RtpMidiSession } from "./midi/rtpMidiSession.js";
 import { decodeMcuMessage } from "./mcu/codec.js";
 import { buttonLabel, isButtonId } from "./mcu/buttons.js";
 import { Bridge } from "./runtime/bridge.js";
-import { runDoctor, type DoctorReport } from "./runtime/doctor.js";
+import { runDoctor, type DoctorNetworkProbe, type DoctorReport } from "./runtime/doctor.js";
 import { runSimulation } from "./sim/scenario.js";
+import { runSoak } from "./sim/soak.js";
 import { createDemoConfig } from "./settings/demo.js";
 import { SettingsServer } from "./settings/server.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 const BOOLEAN_FLAGS = new Set([
   "help",
@@ -118,12 +121,14 @@ function printHelp(): void {
       "  bridge midi list [--config <file>]",
       "  bridge midi monitor [--config <file>] [--device main|extender1|extender2] [--duration <s>]",
       "  bridge simulate [--pretty]",
+      "  bridge soak [--seconds <n>] [--minutes <n>] [--channels <n>] [--log-level <level>] [--pretty]",
       "  bridge mock-ember [--port <n>] [--channels <n>]",
       "  bridge settings [--config <file>] [--port <n>] [--demo] [--no-discover]",
       "  bridge config validate --config <file>",
       "",
       "Write and motor output are disabled unless explicitly armed.",
       "Fairlight must have Ember+ enabled under File > Show Settings > Ember+.",
+      "soak is hardware-free: it uses a mock Ember+ provider and virtual X-Touch surfaces.",
       "",
     ].join("\n"),
   );
@@ -195,7 +200,9 @@ async function commandRun(args: ParsedArgs): Promise<number> {
       { path },
     );
   }
-  const backend = await NativeMidiBackend.create();
+  const backend = config.midi.devices.some((device) => device.enabled && device.transport === "usb")
+    ? await NativeMidiBackend.create()
+    : new EmptyMidiBackend();
   const bridge = new Bridge({ config, arming, backend, logger });
   await bridge.start();
   await waitForShutdown(() => bridge.stop());
@@ -241,6 +248,7 @@ async function commandDiscover(args: ParsedArgs): Promise<number> {
 function printSnapshot(snapshot: FairlightSnapshot, host: string, port: number): void {
   const lines: string[] = [];
   lines.push(`Fairlight Ember+ at ${host}:${port}`);
+  lines.push(`On air: ${snapshot.onAir === null ? "unknown" : snapshot.onAir ? "yes" : "no"}`);
   lines.push(`Channels: ${snapshot.channels.length}`);
   for (const channel of snapshot.channels) {
     const writable = [channel.writableLevel ? "level" : null, channel.writableMute ? "mute" : null].filter(Boolean).join(",");
@@ -288,13 +296,36 @@ async function commandDoctor(args: ParsedArgs): Promise<number> {
   });
 
   let ports: MidiPortsSnapshot | { error: string } | null = null;
+  let network: DoctorNetworkProbe[] | null = null;
   if (!flagBoolean(args, "skip-midi")) {
-    try {
-      const backend = await NativeMidiBackend.create();
-      ports = { inputs: backend.listInputs(), outputs: backend.listOutputs() };
-    } catch (error) {
-      ports = { error: error instanceof Error ? error.message : String(error) };
+    const needsUsb = config.midi.devices.some(
+      (device) => device.enabled && device.transport === "usb",
+    );
+    if (needsUsb) {
+      try {
+        const backend = await NativeMidiBackend.create();
+        ports = { inputs: backend.listInputs(), outputs: backend.listOutputs() };
+      } catch (error) {
+        ports = { error: error instanceof Error ? error.message : String(error) };
+      }
+    } else {
+      ports = { inputs: [], outputs: [] };
     }
+    const networkDevices = config.midi.devices.filter(
+      (device) => device.enabled && device.transport === "network" && device.network !== null,
+    );
+    network = await Promise.all(
+      networkDevices.map(async (device) => {
+        const endpoint = `${device.network?.host}:${device.network?.port}`;
+        const result = await probeRtpMidi({
+          host: device.network?.host ?? "",
+          port: device.network?.port ?? 0,
+          timeoutMs: 2500,
+          logger,
+        });
+        return { role: device.role, endpoint, ok: result.ok, reason: result.reason };
+      }),
+    );
   }
 
   let fairlight: { client: FairlightClient } | { error: string } | null = null;
@@ -319,7 +350,7 @@ async function commandDoctor(args: ParsedArgs): Promise<number> {
   }
 
   try {
-    const report = runDoctor({ config, host, port, ports, fairlight });
+    const report = runDoctor({ config, host, port, ports, fairlight, network });
     if (flagBoolean(args, "json")) {
       process.stdout.write(`${JSON.stringify({ configPath: path, host, port, ...report }, null, 2)}\n`);
     } else {
@@ -369,6 +400,11 @@ async function commandMidiList(args: ParsedArgs): Promise<number> {
   if (config.midi.devices.length > 0) {
     lines.push("Configured devices:");
     for (const device of config.midi.devices) {
+      if (device.transport === "network") {
+        const endpoint = device.network ? `${device.network.host}:${device.network.port}` : "missing";
+        lines.push(`  ${device.role}: network=${endpoint} (RTP-MIDI, data port ${(device.network?.port ?? 0) + 1})`);
+        continue;
+      }
       const input = resolvePort(inputs, device.input);
       const output = resolvePort(outputs, device.output);
       lines.push(
@@ -384,25 +420,65 @@ async function commandMidiMonitor(args: ParsedArgs): Promise<number> {
   const config = loadConfig(configPath(args));
   const requested = flagString(args, "device");
   const selected = config.midi.devices.find(
-    (device) =>
-      device.enabled &&
-      device.transport !== "network" &&
-      (!requested || device.role === requested),
+    (device) => device.enabled && (!requested || device.role === requested),
   );
   if (!selected) {
     throw new ConfigError(
-      requested
-        ? `No enabled USB MIDI device with role ${requested}`
-        : "No enabled USB MIDI device configured (network transport is not active yet)",
+      requested ? `No enabled MIDI device with role ${requested}` : "No enabled MIDI device configured",
     );
   }
+  const logger = createLogger(resolveLogLevel(args, { ...config, logLevel: "warn" }), {
+    pretty: flagBoolean(args, "pretty"),
+  });
+  const durationSeconds = flagNumber(args, "duration") ?? 15;
+  const printMidi = (role: string, message: number[]): void => {
+    const decoded = decodeMcuMessage(message);
+    const entry = {
+      time: new Date().toISOString(),
+      role,
+      message,
+      decoded,
+    };
+    process.stdout.write(JSON.stringify(entry) + "\n");
+  };
+
+  if (selected.transport === "network") {
+    const endpoint = selected.network;
+    if (!endpoint) throw new ConfigError(`Network endpoint for ${selected.role} is missing`);
+    const session = new RtpMidiSession({
+      host: endpoint.host,
+      port: endpoint.port,
+      name: `Fairlight Bridge monitor (${selected.role})`,
+      logger,
+    });
+    session.onEvent((event) => {
+      if (event.type === "online") {
+        process.stderr.write(`Online: RTP-MIDI ${endpoint.host}:${endpoint.port}\n`);
+      } else if (event.type === "offline") {
+        process.stderr.write(`Offline: ${event.reason}\n`);
+      } else {
+        printMidi(selected.role, event.message);
+      }
+    });
+    session.start();
+    if (!session.online) {
+      process.stderr.write(
+        `Waiting for ${selected.role}: ${session.reason ?? `RTP-MIDI ${endpoint.host}:${endpoint.port}`}\n`,
+      );
+    }
+    if (durationSeconds > 0) {
+      await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
+      await session.stop();
+      return 0;
+    }
+    await waitForShutdown(() => session.stop());
+    return 0;
+  }
+
   const singleConfig: BridgeConfig = {
     ...config,
     midi: { ...config.midi, devices: [selected], requireAllDevices: false },
   };
-  const logger = createLogger(resolveLogLevel(args, { ...config, logLevel: "warn" }), {
-    pretty: flagBoolean(args, "pretty"),
-  });
   const backend = await NativeMidiBackend.create();
   const manager = new MidiDeviceManager(singleConfig.midi, backend, logger);
   manager.onEvent((event) => {
@@ -411,14 +487,7 @@ async function commandMidiMonitor(args: ParsedArgs): Promise<number> {
     } else if (event.type === "offline") {
       process.stderr.write(`Offline: ${event.reason}\n`);
     } else if (event.type === "midi") {
-      const decoded = decodeMcuMessage(event.message);
-      const entry = {
-        time: new Date().toISOString(),
-        role: event.role,
-        message: event.message,
-        decoded,
-      };
-      process.stdout.write(JSON.stringify(entry) + "\n");
+      printMidi(event.role, event.message);
     }
   });
   manager.start();
@@ -426,7 +495,6 @@ async function commandMidiMonitor(args: ParsedArgs): Promise<number> {
   if (!status?.online) {
     process.stderr.write(`Waiting for ${selected.role}: ${status?.reason ?? "no port"}\n`);
   }
-  const durationSeconds = flagNumber(args, "duration") ?? 15;
   if (durationSeconds > 0) {
     await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
     manager.stop();
@@ -451,6 +519,37 @@ async function commandSimulate(args: ParsedArgs): Promise<number> {
     process.stdout.write(`FAIL: ${error instanceof Error ? error.message : String(error)}\n`);
     throw error;
   }
+}
+
+async function commandSoak(args: ParsedArgs): Promise<number> {
+  const secondsFlag = flagNumber(args, "seconds");
+  const minutesFlag = flagNumber(args, "minutes");
+  if (secondsFlag !== undefined && minutesFlag !== undefined) {
+    throw new ConfigError("Use either --seconds or --minutes, not both");
+  }
+  const seconds = secondsFlag ?? (minutesFlag !== undefined ? minutesFlag * 60 : 60);
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 86_400) {
+    throw new ConfigError("--seconds must be greater than 0 and at most 86400 (24 hours)");
+  }
+  const channels = flagNumber(args, "channels") ?? 24;
+  if (!Number.isInteger(channels) || channels < 1 || channels > 512) {
+    throw new ConfigError("--channels must be 1..512");
+  }
+  const level = flagString(args, "log-level") ?? "warn";
+  if (!isLogLevel(level)) throw new ConfigError("--log-level must be one of debug, info, warn, error");
+  const logger = createLogger(level, { pretty: flagBoolean(args, "pretty") });
+  const controller = new AbortController();
+  void waitForShutdown(async () => {
+    controller.abort();
+  });
+  const result = await runSoak({
+    seconds,
+    channels,
+    logger,
+    report: (line) => process.stdout.write(line + "\n"),
+    signal: controller.signal,
+  });
+  return result.ok ? 0 : 1;
 }
 
 async function commandMockEmber(args: ParsedArgs): Promise<number> {
@@ -488,7 +587,11 @@ async function commandSettings(args: ParsedArgs): Promise<number> {
     port,
     logger,
     autoDiscover: !flagBoolean(args, "no-discover"),
-    backend: demo ? undefined : await NativeMidiBackend.create(),
+    backend: demo
+      ? undefined
+      : config.midi.devices.some((device) => device.enabled && device.transport === "usb")
+        ? await NativeMidiBackend.create()
+        : new EmptyMidiBackend(),
   });
   const address = await server.start();
   process.stdout.write(
@@ -580,6 +683,7 @@ async function main(argv: string[]): Promise<number> {
   if (command === "discover") return commandDiscover(args);
   if (command === "doctor") return commandDoctor(args);
   if (command === "simulate") return commandSimulate(args);
+  if (command === "soak") return commandSoak(args);
   if (command === "mock-ember") return commandMockEmber(args);
   if (command === "settings") return commandSettings(args);
   if (command === "midi") {

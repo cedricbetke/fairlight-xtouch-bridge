@@ -1,8 +1,8 @@
 import { configuredAuxTargets, configuredMonitorTargets, type BridgeConfig, type RuntimeArming } from "../config.js";
 import { EmberFairlightClient } from "../fairlight/emberClient.js";
-import type { FairlightClient } from "../fairlight/types.js";
+import type { FairlightClient, FairlightEvent } from "../fairlight/types.js";
 import type { Logger } from "../logger.js";
-import { MidiDeviceManager, type MidiDeviceStatus } from "../midi/deviceManager.js";
+import { MidiDeviceManager, type MidiDeviceManagerOptions, type MidiDeviceStatus } from "../midi/deviceManager.js";
 import type { MidiBackend } from "../midi/types.js";
 import { SyncEngine, type SyncEngineStatus } from "../sync/engine.js";
 
@@ -12,11 +12,16 @@ export interface BridgeOptions {
   backend: MidiBackend;
   logger: Logger;
   fairlight?: FairlightClient;
+  midi?: MidiDeviceManagerOptions;
 }
 
 export interface BridgeStatus {
   devices: MidiDeviceStatus[];
   sync: SyncEngineStatus;
+  fairlight: {
+    connected: boolean;
+    onAir: boolean | null;
+  };
 }
 
 export class Bridge {
@@ -25,6 +30,8 @@ export class Bridge {
   readonly #fairlight: FairlightClient;
   readonly #midi: MidiDeviceManager;
   readonly #sync: SyncEngine;
+  #onAir: boolean | null = null;
+  #unsubscribeFairlight: (() => void) | undefined;
   #keepAlive: NodeJS.Timeout | undefined;
   #statusTimer: NodeJS.Timeout | undefined;
   #started = false;
@@ -36,7 +43,11 @@ export class Bridge {
       ...options.config.fairlight,
       autoReconnect: true,
       logger: options.logger,
-      subscribeMeters: options.config.midi.devices.some((device) => device.meters),
+      // The main display can show a Fairlight measurement without any LED meter
+      // chain being active, so its source needs the same subscription.
+      subscribeMeters: options.config.midi.devices.some(
+        (device) => device.meters || device.mainDisplay.mode === "meter",
+      ),
       watchChannelNames:
         options.config.mapping.singleChannel === null
           ? []
@@ -44,7 +55,7 @@ export class Bridge {
       watchAuxSends: configuredAuxTargets(options.config.mapping),
       watchMonitors: configuredMonitorTargets(options.config.mapping),
     });
-    this.#midi = new MidiDeviceManager(options.config.midi, options.backend, options.logger);
+    this.#midi = new MidiDeviceManager(options.config.midi, options.backend, options.logger, options.midi);
     this.#sync = new SyncEngine({
       config: options.config,
       arming: options.arming,
@@ -57,6 +68,8 @@ export class Bridge {
   async start(): Promise<void> {
     if (this.#started) return;
     this.#started = true;
+    this.#unsubscribeFairlight = this.#fairlight.onEvent((event) => this.#handleFairlightEvent(event));
+    if (this.#fairlight.connected) this.#setOnAir(this.#fairlight.snapshot().onAir);
     this.#sync.start();
     this.#midi.onEvent((event) => this.#sync.handleDeviceEvent(event));
     this.#midi.start();
@@ -65,7 +78,9 @@ export class Bridge {
       this.#logger.debug("bridge.status", { status: this.status() });
     }, 30_000);
     await this.#fairlight.connect();
-    const missing = this.#midi.statuses().filter((status) => status.enabled && !status.online);
+    const missing = this.#midi
+      .statuses()
+      .filter((status) => status.enabled && !status.online && status.reason !== "connecting");
     if (missing.length > 0) {
       this.#logger.warn("bridge.midi_devices_offline", { devices: missing });
     }
@@ -90,9 +105,13 @@ export class Bridge {
       clearInterval(this.#keepAlive);
       this.#keepAlive = undefined;
     }
-    this.#midi.stop();
+    // Stop the sync engine first so it can still clear the seven-segment
+    // display while the MIDI outputs are open.
     this.#sync.stop();
+    this.#midi.stop();
     await this.#fairlight.disconnect();
+    this.#unsubscribeFairlight?.();
+    this.#unsubscribeFairlight = undefined;
     this.#logger.info("bridge.stopped");
   }
 
@@ -100,6 +119,30 @@ export class Bridge {
     return {
       devices: this.#midi.statuses(),
       sync: this.#sync.status(),
+      fairlight: {
+        connected: this.#fairlight.connected,
+        onAir: this.#onAir,
+      },
     };
+  }
+
+  #handleFairlightEvent(event: FairlightEvent): void {
+    if (event.type === "system") {
+      this.#setOnAir(event.onAir);
+      return;
+    }
+    if (event.type === "connected") {
+      this.#setOnAir(event.snapshot.onAir);
+      return;
+    }
+    if (event.type === "disconnected") {
+      this.#setOnAir(null);
+    }
+  }
+
+  #setOnAir(value: boolean | null): void {
+    if (this.#onAir === value) return;
+    this.#onAir = value;
+    this.#logger.info("bridge.on_air_changed", { onAir: value });
   }
 }

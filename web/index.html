@@ -42,10 +42,12 @@
                 <span class="status-dot" aria-hidden="true"></span>
                 <span id="fairlightStatus">Fairlight wird geprüft …</span>
               </span>
+              <span class="badge badge-onair" id="onAirBadge" data-state="unknown">Unbekannt</span>
             </div>
           </div>
         </div>
         <nav class="section-nav" aria-label="Bereiche">
+          <a href="#app" id="navApp" hidden>App</a>
           <a href="#verbindung">Verbindung</a>
           <a href="#geraete">Geräte</a>
           <a href="#lcd">LCD-Anzeige</a>
@@ -53,6 +55,59 @@
       </header>
 
       <main class="content">
+        <section id="app" class="panel app-panel" aria-labelledby="appHeading" hidden>
+          <div class="panel-heading">
+            <div>
+              <h2 id="appHeading">App</h2>
+              <p>Die Bridge läuft, solange die App geöffnet ist. Speichern startet sie mit der neuen Belegung neu.</p>
+            </div>
+            <span class="chip" id="appStatus">Wird vorbereitet …</span>
+          </div>
+          <div class="app-grid">
+            <div class="app-status-list">
+              <p class="app-line"><span>Bridge</span><strong id="appBridge">Wird vorbereitet …</strong></p>
+              <p class="app-line"><span>Fairlight</span><strong id="appFairlight">Unbekannt</strong></p>
+              <p class="app-line"><span>X-Touch</span><strong id="appDevices">–</strong></p>
+            </div>
+            <label class="check-row">
+              <input type="checkbox" id="appAutostart" />
+              Bridge bei der Anmeldung automatisch starten
+            </label>
+            <div class="app-arming">
+              <p class="eyebrow">Freigaben für diese Sitzung</p>
+              <label class="check-row">
+                <input type="checkbox" id="appWrites" />
+                Schreibzugriffe auf Fairlight erlauben
+              </label>
+              <label class="check-row">
+                <input type="checkbox" id="appMotors" />
+                Motoren bewegen (nur mit Schreibzugriff)
+              </label>
+              <p class="app-hint">Beide Freigaben sind nach jedem App-Start aus. Ziele bleiben zusätzlich durch die Sicherheitslisten der Konfiguration begrenzt.</p>
+            </div>
+            <div class="app-safety">
+              <p class="eyebrow">Schreibziele in der Konfiguration</p>
+              <div class="app-safety-fields">
+                <label class="field">
+                  <span>Kanäle</span>
+                  <input id="allowedChannels" autocomplete="off" spellcheck="false" placeholder="z. B. 1, 2, 3" />
+                </label>
+                <label class="field">
+                  <span>Busse</span>
+                  <input id="allowedBuses" autocomplete="off" spellcheck="false" placeholder="z. B. main:1" />
+                </label>
+                <label class="field">
+                  <span>Monitore</span>
+                  <input id="allowedMonitors" autocomplete="off" spellcheck="false" placeholder="z. B. 1" />
+                </label>
+              </div>
+              <p class="app-hint">Kommagetrennt. Leer bedeutet: nichts wird geschrieben. Änderungen werden mit Speichern übernommen.</p>
+            </div>
+          </div>
+          <p class="app-error" id="appError" hidden></p>
+          <p class="form-message" id="appMessage" role="status"></p>
+        </section>
+
         <section id="verbindung" class="panel connection-panel" aria-labelledby="fairlightHeading">
           <div class="panel-heading">
             <div>
@@ -161,7 +216,7 @@
       <footer class="savebar">
         <div class="savebar-text">
           <strong id="saveState">Alles gespeichert</strong>
-          <span>Änderungen gelten ab dem nächsten Bridge-Start.</span>
+          <span id="saveHint">Änderungen gelten ab dem nächsten Bridge-Start.</span>
         </div>
         <div class="savebar-actions">
           <button type="button" class="btn btn-ghost" id="reloadButton">Verwerfen</button>
@@ -204,6 +259,40 @@
               <select id="buttonMonitor"></select>
             </label>
             <p class="form-message" id="buttonHint" role="status"></p>
+          </div>
+          <div id="mainDisplayEditor">
+            <p class="eyebrow">Großes Display</p>
+            <label class="field">
+              <span>Anzeige</span>
+              <select id="mainDisplayMode">
+                <option value="off">Aus</option>
+                <option value="auto">Automatisch: Bank und Aux</option>
+                <option value="channels">Sichtbare Kanäle</option>
+                <option value="clock">Uhrzeit</option>
+                <option value="meter">Fairlight-Messwert</option>
+                <option value="on-air">On Air (experimentell)</option>
+              </select>
+            </label>
+            <label class="field" id="mainDisplayScopeField">
+              <span>Kanäle von</span>
+              <select id="mainDisplayScope">
+                <option value="surface">Gesamte Oberfläche</option>
+                <option value="main">Nur Hauptgerät</option>
+              </select>
+            </label>
+            <label class="field" id="mainDisplayMeasurementField" hidden>
+              <span>Messwert</span>
+              <select id="mainDisplayMeasurement">
+                <option value="loudness">Integrierte Lautheit</option>
+                <option value="headroom">Pegelreserve bis 0 dB</option>
+              </select>
+            </label>
+            <label class="field" id="mainDisplayTargetField" hidden>
+              <span>Quelle</span>
+              <select id="mainDisplayTarget"></select>
+            </label>
+            <div class="main-display-sim" id="mainDisplaySim"></div>
+            <p class="form-message" id="mainDisplayHint" role="status"></p>
           </div>
           <p class="form-message" id="deviceStripHint" role="status"></p>
         </aside>

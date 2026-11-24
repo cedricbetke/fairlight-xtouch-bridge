@@ -24,11 +24,13 @@ import {
   type LcdConfig,
   type MappingConfig,
   type MidiPortSelector,
+  type RuntimeArming,
   type SendsOnFaderConfig,
   type SurfaceRole,
 } from "../config.js";
 import { BridgeError, ConfigError } from "../errors.js";
 import { EmberFairlightClient } from "../fairlight/emberClient.js";
+import { RtpMidiSession, probeRtpMidi } from "../midi/rtpMidiSession.js";
 import { resolveLcdDisplay } from "../lcd/display.js";
 import type { Logger } from "../logger.js";
 import { ChannelMap } from "../mapping/channelMap.js";
@@ -78,6 +80,38 @@ export interface SettingsServerOptions {
   logger: Logger;
   backend?: MidiBackend;
   autoDiscover?: boolean;
+  /** Disable the settings page's own Ember+ connection, for example when the desktop app owns it. */
+  onAirMonitor?: boolean;
+  /** Present when the page runs inside the desktop app. */
+  app?: SettingsAppHost;
+}
+
+export interface SettingsAppBridgeInfo {
+  running: boolean;
+  fairlightConnected: boolean;
+  devicesOnline: number;
+  devicesEnabled: number;
+  lastError: string | null;
+}
+
+export interface SettingsAppInfo {
+  autostart: boolean;
+  autostartSupported: boolean;
+  arming: RuntimeArming;
+  bridge: SettingsAppBridgeInfo;
+  onAir: boolean | null;
+  fairlightConnected: boolean;
+  configPath: string;
+  configExists: boolean;
+}
+
+export interface SettingsAppHost {
+  info(): SettingsAppInfo;
+  setAutostart(enabled: boolean): Promise<void> | void;
+  setArming(arming: RuntimeArming): Promise<void> | void;
+  /** Stop the bridge for a port test, then return a function that starts it again. */
+  pauseBridge(): Promise<() => Promise<void>>;
+  configSaved(config: BridgeConfig): Promise<void> | void;
 }
 
 export interface SettingsServerAddress {
@@ -139,6 +173,7 @@ interface SaveRequest {
   lcd?: unknown;
   sendsOnFader?: unknown;
   buttonAssignments?: unknown;
+  safety?: unknown;
 }
 
 interface DemoEvent {
@@ -181,6 +216,8 @@ export class SettingsServer {
   readonly #port: number;
   readonly #host: string;
   readonly #autoDiscover: boolean;
+  readonly #onAirMonitor: boolean;
+  readonly #app: SettingsAppHost | null;
   #config: BridgeConfig;
   #backend: MidiBackend;
   #server: ReturnType<typeof createServer> | null = null;
@@ -188,9 +225,14 @@ export class SettingsServer {
   #channels: DemoChannel[] = [];
   #buses: DemoBus[] = [];
   #monitors: DemoMonitor[] = [];
+  #demoBackend: VirtualMidiBackend | null = null;
+  #demoPortKeys = new Set<string>();
   #demoEvents: DemoEvent[] = [];
   #demoSeq = 0;
   #busyOutputs = new Set<number>();
+  #onAir: boolean | null = null;
+  #fairlightConnected = false;
+  #onAirClient: EmberFairlightClient | null = null;
   #started = false;
 
   constructor(options: SettingsServerOptions) {
@@ -202,12 +244,16 @@ export class SettingsServer {
     this.#boundPort = options.port;
     this.#host = options.host ?? "127.0.0.1";
     this.#autoDiscover = options.autoDiscover ?? true;
+    this.#app = options.app ?? null;
+    this.#onAirMonitor = options.onAirMonitor ?? options.app === undefined;
     this.#webRoot = findWebRoot();
     this.#backend = options.backend ?? this.#buildDemoBackend();
     if (this.#demo) {
       this.#channels = [...DEMO_CHANNELS];
       this.#buses = [...DEMO_BUSES];
       this.#monitors = [...DEMO_MONITORS];
+      // Demo data is simulated; on-air stays unknown because no Fairlight is connected.
+      this.#onAir = null;
     }
   }
 
@@ -247,6 +293,7 @@ export class SettingsServer {
     this.#started = true;
     const bound = server.address();
     if (bound && typeof bound === "object") this.#boundPort = bound.port;
+    if (!this.#demo && this.#autoDiscover && this.#onAirMonitor) this.#startOnAirMonitor();
     if (!this.#demo && this.#autoDiscover) {
       try {
         const snapshot = await this.#discover(this.#config.fairlight.host, this.#config.fairlight.port);
@@ -275,6 +322,11 @@ export class SettingsServer {
     const server = this.#server;
     this.#server = null;
     this.#started = false;
+    const onAirClient = this.#onAirClient;
+    if (onAirClient) {
+      await onAirClient.disconnect().catch(() => undefined);
+      if (this.#onAirClient === onAirClient) this.#onAirClient = null;
+    }
     await new Promise<void>((resolvePromise) => {
       server.close(() => resolvePromise());
     });
@@ -292,31 +344,95 @@ export class SettingsServer {
   }
 
   #buildDemoBackend(): MidiBackend {
-    const backend = new VirtualMidiBackend();
+    const backend = this.#demoBackend ?? new VirtualMidiBackend();
+    this.#demoBackend = backend;
     for (const device of this.#config.midi.devices) {
       if (!device.enabled || device.transport === "network") continue;
       const outputName = device.output.name || device.input.name;
-      backend.addDevice({
+      this.#addDemoPort(backend, {
         inputName: device.input.name,
+        inputOccurrence: device.input.occurrence,
         outputName,
-        allowDuplicateNames: true,
+        outputOccurrence: device.output.occurrence,
       });
-    }
-    if (this.#demo) {
-      for (let spare = 0; spare < 2; spare += 1) {
-        backend.addDevice({
-          inputName: "X-Touch Extender",
-          outputName: "X-Touch Extender",
-          allowDuplicateNames: true,
-        });
-      }
     }
     return backend;
   }
 
+  #resetDemoBackend(): void {
+    this.#demoBackend = null;
+    this.#demoPortKeys.clear();
+    this.#backend = this.#buildDemoBackend();
+  }
+
+  #addDemoPort(
+    backend: VirtualMidiBackend,
+    selector: {
+      inputName: string;
+      inputOccurrence: number;
+      outputName: string;
+      outputOccurrence: number;
+    },
+  ): void {
+    const key = JSON.stringify([
+      selector.inputName,
+      selector.inputOccurrence,
+      selector.outputName,
+      selector.outputOccurrence,
+    ]);
+    if (this.#demoPortKeys.has(key)) return;
+    this.#demoPortKeys.add(key);
+    backend.addDevice({
+      inputName: selector.inputName,
+      outputName: selector.outputName,
+      allowDuplicateNames: true,
+    });
+  }
+
+  #startOnAirMonitor(): void {
+    if (this.#demo || this.#onAirClient) return;
+    const client = new EmberFairlightClient({
+      host: this.#config.fairlight.host,
+      port: this.#config.fairlight.port,
+      requestTimeoutMs: this.#config.fairlight.requestTimeoutMs,
+      reconnectAttempts: 0,
+      autoReconnect: true,
+      logger: this.#logger,
+    });
+    this.#onAirClient = client;
+    client.onEvent((event) => {
+      if (this.#onAirClient !== client) return;
+      if (event.type === "system") {
+        if (this.#onAir !== event.onAir) {
+          this.#onAir = event.onAir;
+          this.#logger.debug("settings.on_air_changed", { onAir: event.onAir });
+        }
+        return;
+      }
+      if (event.type === "connected") {
+        this.#fairlightConnected = true;
+        this.#onAir = event.snapshot.onAir;
+        this.#logger.info("settings.on_air_connected", {
+          host: this.#config.fairlight.host,
+          port: this.#config.fairlight.port,
+          onAir: event.snapshot.onAir,
+        });
+        return;
+      }
+      if (event.type === "disconnected") {
+        this.#fairlightConnected = false;
+        this.#onAir = null;
+        this.#logger.debug("settings.on_air_disconnected", { reason: event.reason });
+      }
+    });
+    void client.connect().catch((error) => {
+      this.#logger.warn("settings.on_air_connect_failed", { error: errorMessage(error) });
+    });
+  }
+
   #enabledRoles(): SurfaceRole[] {
     return this.#config.midi.devices
-      .filter((device) => device.enabled && device.transport !== "network")
+      .filter((device) => device.enabled)
       .map((device) => device.role);
   }
 
@@ -359,8 +475,30 @@ export class SettingsServer {
     }
   }
 
+  async #reserveDemoPort(request: IncomingMessage): Promise<Record<string, unknown>> {
+    if (!this.#demo || !this.#demoBackend) {
+      throw new HttpError(400, "MIDI-Ports können nur in der Demo hinzugefügt werden");
+    }
+    const body = (await this.#readJson(request)) as Record<string, unknown>;
+    const requested = typeof body["name"] === "string" ? body["name"].trim() : "";
+    const name = requested === "" ? "X-Touch Extender" : requested;
+    const occurrence = this.#demoBackend.listInputs().filter((port) => port.name === name).length;
+    this.#addDemoPort(this.#demoBackend, {
+      inputName: name,
+      inputOccurrence: occurrence,
+      outputName: name,
+      outputOccurrence: occurrence,
+    });
+    return {
+      input: { name, occurrence },
+      output: { name, occurrence },
+      ports: this.#listPorts(),
+    };
+  }
+
   #state(): Record<string, unknown> {
     const layout = this.#config.mapping.layout ?? this.#layoutFromDevices();
+    const app = this.#app?.info() ?? null;
     return {
       demo: this.#demo,
       configPath: this.#configPath,
@@ -373,11 +511,15 @@ export class SettingsServer {
       buses: this.#buses,
       monitors: this.#monitors,
       preview: this.#preview(layout, 0),
+      onAir: app ? app.onAir : this.#onAir,
       fairlight: {
         host: this.#config.fairlight.host,
         port: this.#config.fairlight.port,
+        onAir: app ? app.onAir : this.#onAir,
+        connected: app ? app.fairlightConnected : this.#fairlightConnected,
       },
       roleLabels: this.#roleLabels(),
+      ...(app ? { app } : {}),
     };
   }
 
@@ -487,7 +629,13 @@ export class SettingsServer {
           .map((channel) => ({ index: channel.index, name: channel.name }))
           .sort((a, b) => a.index - b.index),
         buses: snapshot.buses
-          .map((bus) => ({ type: bus.type, index: bus.index, name: bus.name }))
+          .map((bus) => ({
+            type: bus.type,
+            index: bus.index,
+            name: bus.name,
+            meterDb: bus.meterDb,
+            integratedLufs: bus.integratedLufs,
+          }))
           .sort((a, b) => (a.type === b.type ? a.index - b.index : a.type.localeCompare(b.type))),
         monitors: snapshot.monitors
           .map((monitor) => ({ index: monitor.index, name: monitor.name }))
@@ -528,8 +676,30 @@ export class SettingsServer {
       this.#sendJson(response, 200, this.#state());
       return;
     }
+    if (url.pathname === "/api/app" && method === "GET") {
+      if (!this.#app) throw new HttpError(404, "Es läuft keine Desktop-App");
+      this.#sendJson(response, 200, { app: this.#app.info() });
+      return;
+    }
+    if (url.pathname === "/api/app" && method === "POST") {
+      if (!this.#app) throw new HttpError(404, "Es läuft keine Desktop-App");
+      this.#sendJson(response, 200, { ok: true, app: await this.#updateApp(await this.#readJson(request)) });
+      return;
+    }
+    if (url.pathname === "/api/onair" && method === "GET") {
+      const app = this.#app?.info() ?? null;
+      this.#sendJson(response, 200, {
+        onAir: app ? app.onAir : this.#onAir,
+        connected: app ? app.fairlightConnected : this.#fairlightConnected,
+      });
+      return;
+    }
     if (url.pathname === "/api/midi/ports" && method === "GET") {
       this.#sendJson(response, 200, this.#listPorts());
+      return;
+    }
+    if (url.pathname === "/api/midi/ports" && method === "POST") {
+      this.#sendJson(response, 200, await this.#reserveDemoPort(request));
       return;
     }
     if (url.pathname === "/api/demo/midi" && method === "GET") {
@@ -555,20 +725,30 @@ export class SettingsServer {
       if (typeof role !== "string" || !this.#configuredRoles().includes(role)) {
         throw new HttpError(400, "Unbekanntes Gerät");
       }
-      const device = this.#config.midi.devices.find((entry) => entry.role === role);
-      if (device?.transport === "network") {
-        const result = await this.#blink(role, null);
+      const resumeBridge = await this.#pauseForDeviceTest();
+      try {
+        const device = this.#config.midi.devices.find((entry) => entry.role === role);
+        if (device?.transport === "network") {
+          const result = await this.#blink(role, null);
+          this.#sendJson(response, 200, result);
+          return;
+        }
+        const selector = this.#readPortSelector(body["output"]);
+        const result = await this.#blink(role, selector);
         this.#sendJson(response, 200, result);
-        return;
+      } finally {
+        await resumeBridge();
       }
-      const selector = this.#readPortSelector(body["output"]);
-      const result = await this.#blink(role, selector);
-      this.#sendJson(response, 200, result);
       return;
     }
     if (url.pathname === "/api/network/test" && method === "POST") {
       const body = (await this.#readJson(request)) as Record<string, unknown>;
-      this.#sendJson(response, 200, this.#testNetwork(body));
+      const resumeBridge = await this.#pauseForDeviceTest();
+      try {
+        this.#sendJson(response, 200, await this.#testNetwork(body));
+      } finally {
+        await resumeBridge();
+      }
       return;
     }
     if (url.pathname === "/api/discover" && method === "POST") {
@@ -589,11 +769,46 @@ export class SettingsServer {
     }
     if (url.pathname === "/api/save" && method === "POST") {
       const body = (await this.#readJson(request)) as SaveRequest;
-      const result = this.#save(body);
+      const result = await this.#save(body);
       this.#sendJson(response, 200, result);
       return;
     }
     this.#sendJson(response, 404, { error: "Unbekannter API-Endpunkt" });
+  }
+
+  async #pauseForDeviceTest(): Promise<() => Promise<void>> {
+    if (!this.#app || this.#demo) return async () => undefined;
+    return this.#app.pauseBridge();
+  }
+
+  async #updateApp(value: unknown): Promise<SettingsAppInfo> {
+    if (!this.#app) throw new HttpError(404, "Es läuft keine Desktop-App");
+    if (!isRecord(value)) throw new HttpError(400, "Einstellungen fehlen");
+    const current = this.#app.info();
+    const autostart = value["autostart"];
+    if (autostart !== undefined && typeof autostart !== "boolean") {
+      throw new HttpError(400, "autostart muss true oder false sein");
+    }
+    const writes = value["writes"];
+    if (writes !== undefined && typeof writes !== "boolean") {
+      throw new HttpError(400, "writes muss true oder false sein");
+    }
+    const motors = value["motors"];
+    if (motors !== undefined && typeof motors !== "boolean") {
+      throw new HttpError(400, "motors muss true oder false sein");
+    }
+    const nextArming: RuntimeArming = {
+      writes: writes ?? current.arming.writes,
+      motors: motors ?? current.arming.motors,
+    };
+    if (nextArming.motors && !nextArming.writes) {
+      throw new HttpError(400, "Motoren erfordern die Freigabe für Schreibzugriffe");
+    }
+    if (autostart !== undefined) await this.#app.setAutostart(autostart);
+    if (nextArming.writes !== current.arming.writes || nextArming.motors !== current.arming.motors) {
+      await this.#app.setArming(nextArming);
+    }
+    return this.#app.info();
   }
 
   #checkOrigin(request: IncomingMessage): void {
@@ -660,6 +875,17 @@ export class SettingsServer {
     }
   }
 
+  #readSafety(value: unknown): BridgeConfig["safety"] {
+    if (value === undefined) return this.#config.safety;
+    if (!isRecord(value)) throw new HttpError(400, "Sicherheitseinstellungen müssen ein Objekt sein");
+    try {
+      return parseConfig({ safety: { ...this.#config.safety, ...value } }).safety;
+    } catch (error) {
+      if (error instanceof ConfigError) throw new HttpError(400, error.message);
+      throw error;
+    }
+  }
+
   #readEnabledRoles(value: unknown): SurfaceRole[] {
     if (value === undefined) return this.#enabledRoles();
     if (!Array.isArray(value)) throw new HttpError(400, "enabledRoles muss eine Liste sein");
@@ -693,7 +919,7 @@ export class SettingsServer {
     throw new HttpError(400, "Kein gültiger MIDI-Ausgang ausgewählt");
   }
 
-  #testNetwork(body: Record<string, unknown>): Record<string, unknown> {
+  async #testNetwork(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     const role = body["role"];
     if (typeof role !== "string" || !this.#configuredRoles().includes(role)) {
       throw new HttpError(400, "Unbekanntes Gerät");
@@ -704,24 +930,37 @@ export class SettingsServer {
       throw new HttpError(400, "Die Adresse muss eine IPv4-Adresse oder ein Hostname sein");
     }
     const port = typeof body["port"] === "number" ? body["port"] : Number(body["port"] ?? DEFAULT_NETWORK_PORT);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      throw new HttpError(400, "Der RTP-MIDI-Port muss zwischen 1 und 65535 liegen");
+    if (!Number.isInteger(port) || port < 1 || port > 65534) {
+      throw new HttpError(400, "Der RTP-MIDI-Port muss zwischen 1 und 65534 liegen");
     }
-    if (!this.#demo) {
+    if (this.#demo) {
+      this.#logger.info("settings.network_test", { role, host, port, simulated: true });
+      return {
+        ok: true,
+        simulated: true,
+        transport: "network",
+        role,
+        host,
+        port,
+        message: "Simulation: RTP-MIDI-Sitzung erreichbar",
+      };
+    }
+    const result = await probeRtpMidi({ host, port, timeoutMs: 4000, logger: this.#logger });
+    this.#logger.info("settings.network_test", { role, host, port, ok: result.ok, reason: result.reason });
+    if (!result.ok) {
       throw new HttpError(
         409,
-        "Netzwerk-Transport ist noch nicht aktiv. Der Verbindungstest ist derzeit nur im Demo-Modus simuliert.",
+        `RTP-MIDI-Sitzung mit ${host}:${port} nicht möglich: ${result.reason ?? "keine Antwort"}. Läuft die Bridge bereits für dieses Gerät?`,
       );
     }
-    this.#logger.info("settings.network_test", { role, host, port, simulated: true });
     return {
       ok: true,
-      simulated: true,
+      simulated: false,
       transport: "network",
       role,
       host,
       port,
-      message: "Simulation: RTP-MIDI-Sitzung erreichbar",
+      message: `RTP-MIDI-Sitzung mit ${host}:${port} angenommen`,
     };
   }
 
@@ -731,7 +970,7 @@ export class SettingsServer {
       if (!this.#demo) {
         throw new HttpError(
           409,
-          "Netzwerk-Transport ist noch nicht aktiv. Gerät finde ist derzeit nur im Demo-Modus simuliert.",
+          "Gerät finden ist über RTP-MIDI noch nicht verfügbar. Der Verbindungstest prüft die Sitzung.",
         );
       }
       await this.#blinkSimulated(role);
@@ -823,11 +1062,12 @@ export class SettingsServer {
     }
   }
 
-  #save(body: SaveRequest): Record<string, unknown> {
+  async #save(body: SaveRequest): Promise<Record<string, unknown>> {
     const layout = this.#readLayout(body.layout);
     const lcd = this.#readLcd(body.lcd);
     const sendsOnFader = this.#readSendsOnFader(body.sendsOnFader);
     const buttonAssignments = this.#readButtonAssignments(body.buttonAssignments);
+    const safety = this.#readSafety(body.safety);
     const fairlightObject = isRecord(body.fairlight) ? body.fairlight : {};
     const host =
       typeof fairlightObject["host"] === "string" && fairlightObject["host"].trim() !== ""
@@ -837,6 +1077,7 @@ export class SettingsServer {
     if (!Array.isArray(body.devices)) throw new HttpError(400, "Geräte fehlen");
     const devices = body.devices.map((device) => {
       if (!isRecord(device)) throw new HttpError(400, "Ungültige Gerätedaten");
+      const existing = this.#config.midi.devices.find((entry) => entry.role === device["role"]);
       return {
         role: device["role"],
         kind: device["kind"] ?? ((device["role"] === "main") ? "main" : "extender"),
@@ -848,6 +1089,8 @@ export class SettingsServer {
         network: device["network"],
         encoder: device["encoder"] ?? "off",
         meters: device["meters"] ?? false,
+        mainDisplay:
+          device["mainDisplay"] === undefined ? existing?.mainDisplay : device["mainDisplay"],
       };
     });
     const candidate = parseConfig({
@@ -870,7 +1113,7 @@ export class SettingsServer {
         buttonAssignments,
       },
       lcd,
-      safety: this.#config.safety,
+      safety,
       logLevel: this.#config.logLevel,
     });
     if (!candidate.midi.devices.some((device) => device.enabled)) {
@@ -888,13 +1131,14 @@ export class SettingsServer {
       throw new BridgeError("SETTINGS_SAVE_FAILED", `Konfiguration konnte nicht geschrieben werden: ${errorMessage(error)}`);
     }
     this.#config = candidate;
-    if (this.#demo) this.#backend = this.#buildDemoBackend();
+    if (this.#demo) this.#resetDemoBackend();
     this.#logger.info("settings.saved", { configPath: this.#configPath });
+    if (this.#app) await this.#app.configSaved(candidate);
     return {
       ok: true,
       configPath: this.#configPath,
       config: candidate,
-      requiresRestart: true,
+      requiresRestart: this.#app === null,
     };
   }
 

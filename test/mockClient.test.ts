@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 
 import { MockFairlightClient } from "../src/fairlight/mockClient.js";
+import type { FairlightEvent } from "../src/fairlight/types.js";
 
 describe("mock Fairlight client buses", () => {
   it("creates explicit bus specs with writable pan", async () => {
@@ -31,5 +32,21 @@ describe("mock Fairlight client buses", () => {
     const buses = client.snapshot().buses;
     assert.deepEqual(buses.map((bus) => `${bus.type}:${bus.index}`), ["main:1", "main:2"]);
     assert.equal(buses.every((bus) => bus.writablePan === false), true);
+  });
+
+  it("exposes a read-only on-air state", async () => {
+    const client = new MockFairlightClient({ channelCount: 2 });
+    await client.connect();
+    assert.equal(client.snapshot().onAir, false);
+
+    const events: FairlightEvent[] = [];
+    client.onEvent((event) => events.push(event));
+    client.setOnAir(true);
+    assert.equal(client.snapshot().onAir, true);
+    assert.ok(events.some((event) => event.type === "system" && event.onAir === true));
+    assert.equal(client.writes.length, 0);
+
+    const unknown = new MockFairlightClient({ channelCount: 1, onAir: null });
+    assert.equal(unknown.snapshot().onAir, null);
   });
 });

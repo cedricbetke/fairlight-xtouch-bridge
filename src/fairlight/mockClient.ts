@@ -29,6 +29,8 @@ export interface MockBusSpec {
   muted?: boolean;
   pan?: number | null;
   meterDb?: number;
+  /** Integrated loudness in LUFS; usually only main buses provide it. */
+  integratedLufs?: number | null;
   writableLevel?: boolean;
   writableMute?: boolean;
   writablePan?: boolean;
@@ -63,6 +65,8 @@ export interface MockFairlightOptions {
   monitors?: MockMonitorSpec[];
   latencyMs?: number;
   logger?: Logger;
+  /** Simulated Fairlight on-air state. Defaults to false; null means unknown. */
+  onAir?: boolean | null;
 }
 
 export interface MockWrite {
@@ -101,6 +105,7 @@ export class MockFairlightClient implements FairlightClient {
   #buses = new Map<string, BusState>();
   #monitors = new Map<number, MonitorState>();
   #listeners = new Set<FairlightEventListener>();
+  #onAir: boolean | null;
   #latencyMs: number;
   #logger: Logger | undefined;
   #pendingFailure: Error | null = null;
@@ -109,6 +114,7 @@ export class MockFairlightClient implements FairlightClient {
   constructor(options: MockFairlightOptions = {}) {
     this.#latencyMs = options.latencyMs ?? 0;
     this.#logger = options.logger;
+    this.#onAir = options.onAir === undefined ? false : options.onAir;
     const channelCount = options.channelCount ?? 24;
     for (let index = 1; index <= channelCount; index += 1) {
       const sends: Record<string, SendState> = {};
@@ -139,6 +145,7 @@ export class MockFairlightClient implements FairlightClient {
           muted: spec.muted ?? false,
           pan: spec.pan ?? null,
           meterDb: spec.meterDb ?? -60,
+          integratedLufs: spec.integratedLufs ?? null,
           writableLevel: spec.writableLevel ?? true,
           writableMute: spec.writableMute ?? true,
           writablePan: spec.writablePan ?? typeof spec.pan === "number",
@@ -154,6 +161,7 @@ export class MockFairlightClient implements FairlightClient {
           muted: false,
           pan: null,
           meterDb: -60,
+          integratedLufs: null,
           writableLevel: true,
           writableMute: true,
           writablePan: false,
@@ -205,6 +213,7 @@ export class MockFairlightClient implements FairlightClient {
     return {
       revision,
       discoveredAt: new Date().toISOString(),
+      onAir: this.#onAir,
       channels: [...this.#channels.values()].sort((a, b) => a.index - b.index).map(cloneChannel),
       buses: [...this.#buses.values()].sort((a, b) =>
         a.type === b.type ? a.index - b.index : a.type.localeCompare(b.type),
@@ -344,6 +353,12 @@ export class MockFairlightClient implements FairlightClient {
     });
   }
 
+  /** Removes a bus and publishes a fresh snapshot, like a structure change. */
+  removeBus(type: BusType, index: number): void {
+    if (!this.#buses.delete(busKey(type, index))) return;
+    this.#emit({ type: "snapshot", snapshot: this.snapshot() });
+  }
+
   addAuxSend(channelIndex: number, spec: MockAuxSendSpec): void {
     const channel = this.#channels.get(channelIndex);
     if (!channel) return;
@@ -405,7 +420,7 @@ export class MockFairlightClient implements FairlightClient {
   injectBusUpdate(
     type: BusType,
     index: number,
-    fields: Partial<Pick<BusState, "levelDb" | "muted" | "name" | "pan" | "meterDb">>,
+    fields: Partial<Pick<BusState, "levelDb" | "muted" | "name" | "pan" | "meterDb" | "integratedLufs">>,
   ): void {
     const bus = this.#buses.get(busKey(type, index));
     if (!bus) return;
@@ -429,6 +444,10 @@ export class MockFairlightClient implements FairlightClient {
     if (fields.meterDb !== undefined) {
       bus.meterDb = fields.meterDb;
       changed.push("meter");
+    }
+    if (fields.integratedLufs !== undefined) {
+      bus.integratedLufs = fields.integratedLufs;
+      changed.push("integrated");
     }
     if (changed.length > 0) this.#emit({ type: "bus", bus: cloneBus(bus), changed });
   }
@@ -457,6 +476,13 @@ export class MockFairlightClient implements FairlightClient {
       changed.push("name");
     }
     if (changed.length > 0) this.#emit({ type: "monitor", monitor: cloneMonitor(monitor), changed });
+  }
+
+  setOnAir(value: boolean | null): void {
+    this.#onAir = value;
+    revision += 1;
+    this.#emit({ type: "system", onAir: value });
+    this.#logger?.debug("fairlight.mock.on_air_set", { onAir: value });
   }
 
   injectDisconnect(reason = "mock disconnect"): void {

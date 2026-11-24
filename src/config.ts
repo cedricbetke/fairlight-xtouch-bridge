@@ -34,6 +34,45 @@ export type SurfaceMode = (typeof SURFACE_MODES)[number];
 export const ENCODER_MODES = ["off", "pan"] as const;
 export type EncoderMode = (typeof ENCODER_MODES)[number];
 
+/**
+ * Content of the 10-digit seven-segment display on the main X-Touch.
+ *
+ * `off` is the default so existing setups do not receive display updates.
+ * `auto` shows the visible channel range in the main mix and the active aux in
+ * sends-on-fader mode. `on-air` is marked experimental because the readability
+ * of words on seven-segment digits has not been verified on the device.
+ */
+export const MAIN_DISPLAY_MODES = ["off", "auto", "channels", "clock", "on-air", "meter"] as const;
+export type MainDisplayMode = (typeof MAIN_DISPLAY_MODES)[number];
+
+/** Which surfaces the visible channel range is derived from. */
+export const MAIN_DISPLAY_SCOPES = ["main", "surface"] as const;
+export type MainDisplayScope = (typeof MAIN_DISPLAY_SCOPES)[number];
+
+/**
+ * Fairlight measurement shown in `meter` mode:
+ * - `loudness`: integrated loudness of a main bus (`main/mainN/meters/integrated`).
+ * - `headroom`: peak headroom to 0 dB of any bus (`<type>/<typeN>/meter`), shown
+ *   without a sign so the unverified minus glyph is not needed.
+ */
+export const MAIN_DISPLAY_MEASUREMENTS = ["loudness", "headroom"] as const;
+export type MainDisplayMeasurement = (typeof MAIN_DISPLAY_MEASUREMENTS)[number];
+
+export interface MainDisplayMeterConfig {
+  measurement: MainDisplayMeasurement;
+  target: FixedBusTargetConfig;
+}
+
+export interface MainDisplayConfig {
+  mode: MainDisplayMode;
+  scope: MainDisplayScope;
+  meter: MainDisplayMeterConfig | null;
+}
+
+export function defaultMainDisplayConfig(): MainDisplayConfig {
+  return { mode: "off", scope: "surface", meter: null };
+}
+
 export const BUS_TYPES = ["main", "sub", "aux", "mixm", "mtx", "vca"] as const;
 export type BusType = (typeof BUS_TYPES)[number];
 
@@ -151,6 +190,7 @@ export interface MidiDeviceConfig {
   network: MidiNetworkConfig | null;
   encoder: EncoderMode;
   meters: boolean;
+  mainDisplay: MainDisplayConfig;
 }
 
 export interface FairlightConfig {
@@ -389,6 +429,13 @@ function readDevice(value: unknown, path: string): MidiDeviceConfig {
     throw new ConfigError(`${path}.transport must be one of ${MIDI_TRANSPORTS.join(", ")}`, { path });
   }
   const transport = transportValue as MidiTransport;
+  const network = transport === "network" ? readNetwork(object["network"], `${path}.network`) : null;
+  const defaultSelector: MidiPortSelector | null = network
+    ? { name: `${network.host}:${network.port}`, occurrence: 0 }
+    : null;
+  const input = object["input"] === undefined && defaultSelector ? { ...defaultSelector } : readResource(object["input"], `${path}.input`);
+  const output =
+    object["output"] === undefined && defaultSelector ? { ...defaultSelector } : readResource(object["output"], `${path}.output`);
   const encoderValue = readString(object["encoder"], `${path}.encoder`, "off");
   if (!(ENCODER_MODES as readonly string[]).includes(encoderValue)) {
     throw new ConfigError(`${path}.encoder must be one of ${ENCODER_MODES.join(", ")}`, { path });
@@ -399,12 +446,58 @@ function readDevice(value: unknown, path: string): MidiDeviceConfig {
     name: readDeviceName(object["name"], `${path}.name`),
     enabled: readBoolean(object["enabled"], `${path}.enabled`, true),
     transport,
-    input: readResource(object["input"], `${path}.input`),
-    output: readResource(object["output"], `${path}.output`),
-    network: transport === "network" ? readNetwork(object["network"], `${path}.network`) : null,
+    input,
+    output,
+    network,
     encoder: encoderValue as EncoderMode,
     meters: readBoolean(object["meters"], `${path}.meters`, false),
+    mainDisplay: readMainDisplay(object["mainDisplay"], `${path}.mainDisplay`),
   };
+}
+
+function readMainDisplay(value: unknown, path: string): MainDisplayConfig {
+  const defaults = defaultMainDisplayConfig();
+  if (value === undefined || value === null) return defaults;
+  const object = objectAt(value, path);
+  const modeValue = readString(object["mode"], `${path}.mode`, defaults.mode);
+  if (!(MAIN_DISPLAY_MODES as readonly string[]).includes(modeValue)) {
+    throw new ConfigError(`${path}.mode must be one of ${MAIN_DISPLAY_MODES.join(", ")}`, { path });
+  }
+  const scopeValue = readString(object["scope"], `${path}.scope`, defaults.scope);
+  if (!(MAIN_DISPLAY_SCOPES as readonly string[]).includes(scopeValue)) {
+    throw new ConfigError(`${path}.scope must be one of ${MAIN_DISPLAY_SCOPES.join(", ")}`, { path });
+  }
+  const meter = readMainDisplayMeter(object["meter"], `${path}.meter`);
+  const mode = modeValue as MainDisplayMode;
+  return {
+    mode,
+    scope: scopeValue as MainDisplayScope,
+    // A meter mode without a target falls back to the common case instead of
+    // refusing an otherwise valid configuration.
+    meter:
+      meter ??
+      (mode === "meter"
+        ? { measurement: "loudness", target: { kind: "bus", busType: "main", index: 1 } }
+        : null),
+  };
+}
+
+function readMainDisplayMeter(value: unknown, path: string): MainDisplayMeterConfig | null {
+  if (value === undefined || value === null) return null;
+  const object = objectAt(value, path);
+  const measurementValue = readString(object["measurement"], `${path}.measurement`, "loudness");
+  if (!(MAIN_DISPLAY_MEASUREMENTS as readonly string[]).includes(measurementValue)) {
+    throw new ConfigError(`${path}.measurement must be one of ${MAIN_DISPLAY_MEASUREMENTS.join(", ")}`, { path });
+  }
+  const target = readLcdTarget(object["target"], `${path}.target`);
+  if (target.kind !== "bus") {
+    throw new ConfigError(`${path}.target must be a bus target`, { path });
+  }
+  if (measurementValue === "loudness" && target.busType !== "main") {
+    // Integrated loudness is only documented for main buses.
+    throw new ConfigError(`${path}.target must be a main bus for the loudness measurement`, { path });
+  }
+  return { measurement: measurementValue as MainDisplayMeasurement, target };
 }
 
 function readNetwork(value: unknown, path: string): MidiNetworkConfig {
@@ -420,7 +513,7 @@ function readNetwork(value: unknown, path: string): MidiNetworkConfig {
     host,
     port: readNumber(object["port"], `${path}.port`, DEFAULT_NETWORK_PORT, {
       min: 1,
-      max: 65535,
+      max: 65534,
       integer: true,
     }),
   };
@@ -773,6 +866,14 @@ export function parseConfig(value: unknown): BridgeConfig {
       `midi.devices may define at most one main surface (found ${mains.map((device) => device.role).join(", ")})`,
       { roles: mains.map((device) => device.role) },
     );
+  }
+  for (const device of devices) {
+    if (device.kind !== "main" && device.mainDisplay.mode !== "off") {
+      throw new ConfigError(
+        `midi.devices[${device.role}].mainDisplay is only available on the main surface`,
+        { role: device.role, path: `midi.devices.${device.role}.mainDisplay` },
+      );
+    }
   }
   validatePortUniqueness(devices, "input");
   validatePortUniqueness(devices, "output");

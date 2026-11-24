@@ -25,6 +25,9 @@ export const EN_MESSAGES = {
   "Sprache": "Language",
   "Fairlight wird geprüft …": "Checking Fairlight …",
   "Kanäle werden geladen": "Loading channels",
+  "ON AIR": "ON AIR",
+  "OFF AIR": "OFF AIR",
+  "Unbekannt": "Unknown",
 
   // Fairlight-Verbindung
   "Kanäle einlesen": "Load channels",
@@ -62,6 +65,37 @@ export const EN_MESSAGES = {
   "Blinkt …": "Blinking …",
   "Bearbeiten": "Edit",
   "Gerät bearbeiten": "Edit device",
+
+  // Großes Display am Main
+  "Großes Display": "Main display",
+  "Anzeige": "Content",
+  "Automatisch: Bank und Aux": "Automatic: bank and aux",
+  "Sichtbare Kanäle": "Visible channels",
+  "Uhrzeit": "Time",
+  "On Air (experimentell)": "On air (experimental)",
+  "Kanäle von": "Channels from",
+  "Gesamte Oberfläche": "Whole surface",
+  "Nur Hauptgerät": "Main unit only",
+  "Fairlight-Messwert": "Fairlight measurement",
+  "Messwert": "Measurement",
+  "Integrierte Lautheit": "Integrated loudness",
+  "Pegelreserve bis 0 dB": "Headroom to 0 dB",
+  "Quelle": "Source",
+  "Pegelreserve bis 0 dB aus dem Spitzenpegel des gewählten Busses; ohne Messwert zeigt die Vorschau einen Beispielwert.":
+    "Headroom to 0 dB from the peak level of the selected bus; without a reading the preview shows an example value.",
+  "Integrierte Lautheit des gewählten Main-Busses. Das Minuszeichen ist am Gerät nicht geprüft; die Vorschau zeigt ohne Messwert einen Beispielwert.":
+    "Integrated loudness of the selected main bus. The minus sign is not verified on the device; without a reading the preview shows an example value.",
+  "Main Mix": "Main mix",
+  "Sends on Fader simulieren": "Simulate sends on fader",
+  "On-Air-Zustand simulieren": "Simulate the on-air state",
+  "Die Bridge lässt die Anzeige unverändert.": "The bridge leaves the display untouched.",
+  "Lokale Uhrzeit des Bridge-Rechners. Beispiel, nicht am Gerät geprüft.":
+    "Local time of the bridge host. Example, not verified on the device.",
+  "Experimentell: Die Lesbarkeit von Wörtern auf 7 Segmenten ist am Gerät nicht geprüft. Unbekannter Status bleibt leer.":
+    "Experimental: word legibility on seven-segment digits is not verified on the device. An unknown state stays blank.",
+  "Folgt der Bank-Vorschau. Am Gerät nicht geprüft.":
+    "Follows the bank preview. Not verified on the device.",
+
   "Gerät": "Device",
   "Schließen": "Close",
   "Schließen …": "Closing …",
@@ -72,7 +106,7 @@ export const EN_MESSAGES = {
     "Device removed. The change applies after saving and restarting the bridge.",
   "Gerät hinzugefügt · bitte Anschluss wählen": "Device added · choose a connection",
   "Gerät inaktiv · wird beim Banking nicht berücksichtigt": "Device inactive · ignored by banking",
-  "Netzwerk · nimmt noch nicht am Banking teil": "Network · not part of banking yet",
+  "Netzwerk · RTP-MIDI · nimmt am Banking teil": "Network · RTP-MIDI · part of banking",
   "Fest · alle acht Fader frei": "Fixed · all eight faders empty",
   "Banking · Kanäle einlesen": "Banking · load channels",
   "Banking · keine Kanäle in dieser Bank": "Banking · no channels in this bank",
@@ -91,20 +125,19 @@ export const EN_MESSAGES = {
   "Lese MIDI-Ports …": "Reading MIDI ports …",
   "Keine MIDI-Ports gefunden": "No MIDI ports found",
   "Bitte zuerst eine IP-Adresse eintragen.": "Enter an IP address first.",
-  "Der RTP-Port muss zwischen 1 und 65535 liegen.": "The RTP port must be between 1 and 65535.",
+  "Der RTP-Port muss zwischen 1 und 65534 liegen.": "The RTP port must be between 1 and 65534.",
   "Prüfe Verbindung …": "Checking connection …",
   "Verbindung erreichbar": "Connection reachable",
   "Verbindung erreichbar · Simulation": "Connection reachable · simulation",
   "Simulation: RTP-MIDI-Sitzung erreichbar": "Simulation: RTP-MIDI session reachable",
   "Simulation: RTP-MIDI-Sitzung erreichbar · Simulation": "Simulation: RTP-MIDI session reachable · simulation",
-  "Netzwerk-Transport ist noch nicht aktiv. Der Verbindungstest ist derzeit nur im Demo-Modus simuliert.":
-    "The network transport is not active yet. The connection test is currently simulated in demo mode only.",
-  "Netzwerk-Transport ist noch nicht aktiv. Gerät finde ist derzeit nur im Demo-Modus simuliert.":
-    "The network transport is not active yet. Device find is currently simulated in demo mode only.",
+  "Gerät finden ist über RTP-MIDI noch nicht verfügbar. Der Verbindungstest prüft die Sitzung.":
+    "Finding a device over RTP-MIDI is not available yet. The connection test checks the session.",
   "Unbekanntes Gerät": "Unknown device",
   "Bitte eine IP-Adresse oder einen Hostnamen eintragen": "Enter an IP address or hostname",
   "Die Adresse muss eine IPv4-Adresse oder ein Hostname sein": "The address must be an IPv4 address or hostname",
   "Der RTP-MIDI-Port muss zwischen 1 und 65535 liegen": "The RTP-MIDI port must be between 1 and 65535",
+  "Der RTP-MIDI-Port muss zwischen 1 und 65534 liegen": "The RTP-MIDI port must be between 1 and 65534",
 
   // Feste und freie Ziele
   "Festes Ziel": "Fixed target",
@@ -183,6 +216,43 @@ export const EN_MESSAGES = {
   "Blau": "Blue",
   "Weiß": "White",
 
+  // App (Desktop-Installation)
+  "Die Bridge läuft, solange die App geöffnet ist. Speichern startet sie mit der neuen Belegung neu.":
+    "The bridge runs as long as the app is open. Saving restarts it with the new layout.",
+  "Wird vorbereitet …": "Preparing …",
+  "Bridge läuft": "Bridge running",
+  "Bridge gestoppt": "Bridge stopped",
+  "Läuft": "Running",
+  "Gestoppt": "Stopped",
+  "Verbunden": "Connected",
+  "Verbunden · ON AIR": "Connected · ON AIR",
+  "Verbunden · OFF AIR": "Connected · OFF AIR",
+  "Nicht verbunden": "Not connected",
+  "Keine Geräte eingerichtet": "No devices configured",
+  "Bridge bei der Anmeldung automatisch starten": "Start the bridge automatically at login",
+  "Freigaben für diese Sitzung": "Permissions for this session",
+  "Schreibzugriffe auf Fairlight erlauben": "Allow writes to Fairlight",
+  "Motoren bewegen (nur mit Schreibzugriff)": "Move motors (requires write access)",
+  "Beide Freigaben sind nach jedem App-Start aus. Ziele bleiben zusätzlich durch die Sicherheitslisten der Konfiguration begrenzt.":
+    "Both permissions are off after every app start. Targets remain limited by the configuration's safety lists.",
+  "Änderungen werden direkt nach dem Speichern übernommen.":
+    "Changes apply directly after saving.",
+  "Schreibziele in der Konfiguration": "Write targets in the configuration",
+  "Kanäle": "Channels",
+  "Busse": "Buses",
+  "Monitore": "Monitors",
+  "z. B. 1, 2, 3": "e.g. 1, 2, 3",
+  "z. B. main:1": "e.g. main:1",
+  "z. B. 1": "e.g. 1",
+  "Kommagetrennt. Leer bedeutet: nichts wird geschrieben. Änderungen werden mit Speichern übernommen.":
+    "Comma-separated. Empty means nothing is written. Changes apply when you save.",
+  "Gespeichert. Die Bridge läuft mit der neuen Belegung.":
+    "Saved. The bridge is running with the new layout.",
+  "Wird übernommen …": "Applying …",
+  "Übernommen.": "Applied.",
+  "Schreibzugriff ist aktiv, aber keine Ziele sind freigegeben. Trage Kanäle, Busse oder Monitore ein und speichere.":
+    "Write access is enabled, but no targets are allowed. Enter channels, buses or monitors and save.",
+
   // Fußleiste
   "Alles gespeichert": "All saved",
   "Ungespeicherte Änderungen": "Unsaved changes",
@@ -216,6 +286,10 @@ export const EN_MESSAGES = {
 // Muster für Texte mit eingesetzten Werten. Reihenfolge: speziell vor allgemein.
 const EN_RULES = [
   [/^Anfrage fehlgeschlagen \((\d+)\)$/, "Request failed ($1)"],
+  [/^(\d+) von (\d+) online$/, "$1 of $2 online"],
+  [/^Kanäle: „(.+)“ ist keine gültige Nummer\.$/, "Channels: “$1” is not a valid number."],
+  [/^Busse: „(.+)“ muss die Form main:1 haben\.$/, "Buses: “$1” must use the form main:1."],
+  [/^Monitore: „(.+)“ ist keine gültige Nummer\.$/, "Monitors: “$1” is not a valid number."],
   [/^Farben aktiv · 1 Ausnahme$/, "Colors on · 1 override"],
   [/^Farben aktiv · (\d+) Ausnahmen$/, "Colors on · $1 overrides"],
   [/^Aktiv · (.+)$/, "Active · $1"],
@@ -245,10 +319,15 @@ const EN_RULES = [
   [/^Fest · (.+) F(\d+)$/, "Fixed · $1 F$2"],
   [/^Banking · Kanäle (\d+)–(\d+)$/, "Banking · channels $1–$2"],
   [/^Banking · (\d+) Kanäle in dieser Bank$/, "Banking · $1 channels in this bank"],
-  [/^Netzwerk-Entwurf · Simulation für (.+):(\d+)$/, "Network draft · simulation for $1:$2"],
+  [/^Netzwerk · Simulation für (.+):(\d+)$/, "Network · simulation for $1:$2"],
+  [/^Netzwerk gespeichert · RTP-MIDI \((.+):(\d+)\)$/, "Network saved · RTP-MIDI ($1:$2)"],
   [
-    /^Netzwerk gespeichert · Transport noch nicht aktiv \((.+):(\d+)\)$/,
-    "Network saved · transport not active yet ($1:$2)",
+    /^RTP-MIDI-Sitzung mit (.+):(\d+) angenommen$/,
+    "RTP-MIDI session with $1:$2 accepted",
+  ],
+  [
+    /^RTP-MIDI-Sitzung mit (.+):(\d+) nicht möglich: (.+)\. Läuft die Bridge bereits für dieses Gerät\?$/,
+    "RTP-MIDI session with $1:$2 failed: $3. Is the bridge already running for this device?",
   ],
   [/^Netzwerk · (.+):(\d+)$/, "Network · $1:$2"],
   [/^Eingang\s+(.+) · nicht gefunden$/, "Input $1 · not found"],
@@ -288,6 +367,10 @@ const EN_RULES = [
   [
     /^(.+?) schaltet Monitor (\d+) \((.+)\) auf Dim\. Die LED leuchtet nur bei bestätigtem Dim-Zustand\.$/,
     "$1 dims monitor $2 ($3). The LED lights only when Fairlight confirms dim.",
+  ],
+  [
+    /^Im Betrieb: Bankbereich; bei aktivem Sends on Fader Aux (\d+)\. Ohne Fairlight bleibt sie leer\.$/,
+    "During operation: bank range; with sends on fader active, aux $1. It stays blank without Fairlight.",
   ],
 ];
 

@@ -71,7 +71,25 @@ function defaultDevice(role) {
     network: { host: "", port: DEFAULT_NETWORK_PORT },
     encoder: "off",
     meters: false,
+    mainDisplay: { mode: "off", scope: "surface", meter: null },
   };
+}
+
+const MAIN_DISPLAY_MODES = ["off", "auto", "channels", "clock", "on-air", "meter"];
+const MAIN_DISPLAY_MEASUREMENTS = ["loudness", "headroom"];
+
+function normalizeMainDisplayMeter(value) {
+  if (!value || typeof value !== "object") return null;
+  const target = normalizeFixedTarget(value.target);
+  if (!target || target.kind !== "bus") return null;
+  const measurement = MAIN_DISPLAY_MEASUREMENTS.includes(value.measurement) ? value.measurement : "loudness";
+  return { measurement, target: { kind: "bus", busType: target.busType, index: target.index } };
+}
+
+function normalizeMainDisplay(value) {
+  const mode = MAIN_DISPLAY_MODES.includes(value?.mode) ? value.mode : "off";
+  const scope = value?.scope === "main" ? "main" : "surface";
+  return { mode, scope, meter: normalizeMainDisplayMeter(value?.meter) };
 }
 
 const BUS_LABELS = {
@@ -150,6 +168,7 @@ const dom = {
   modeBadge: document.getElementById("modeBadge"),
   fairlightPill: document.getElementById("fairlightPill"),
   fairlightStatus: document.getElementById("fairlightStatus"),
+  onAirBadge: document.getElementById("onAirBadge"),
   channelCount: document.getElementById("channelCount"),
   discoverForm: document.getElementById("discoverForm"),
   fairlightHost: document.getElementById("fairlightHost"),
@@ -170,6 +189,16 @@ const dom = {
   buttonMonitorField: document.getElementById("buttonMonitorField"),
   buttonMonitor: document.getElementById("buttonMonitor"),
   buttonHint: document.getElementById("buttonHint"),
+  mainDisplayEditor: document.getElementById("mainDisplayEditor"),
+  mainDisplayMode: document.getElementById("mainDisplayMode"),
+  mainDisplayScopeField: document.getElementById("mainDisplayScopeField"),
+  mainDisplayScope: document.getElementById("mainDisplayScope"),
+  mainDisplayMeasurementField: document.getElementById("mainDisplayMeasurementField"),
+  mainDisplayMeasurement: document.getElementById("mainDisplayMeasurement"),
+  mainDisplayTargetField: document.getElementById("mainDisplayTargetField"),
+  mainDisplayTarget: document.getElementById("mainDisplayTarget"),
+  mainDisplaySim: document.getElementById("mainDisplaySim"),
+  mainDisplayHint: document.getElementById("mainDisplayHint"),
   singleChannelNotice: document.getElementById("singleChannelNotice"),
   deviceRow: document.getElementById("deviceRow"),
   addDevice: document.getElementById("addDevice"),
@@ -199,6 +228,21 @@ const dom = {
   channelHint: document.getElementById("channelHint"),
   toastRegion: document.getElementById("toastRegion"),
   langSelect: document.getElementById("langSelect"),
+  navApp: document.getElementById("navApp"),
+  appPanel: document.getElementById("app"),
+  appStatus: document.getElementById("appStatus"),
+  appBridge: document.getElementById("appBridge"),
+  appFairlight: document.getElementById("appFairlight"),
+  appDevices: document.getElementById("appDevices"),
+  appAutostart: document.getElementById("appAutostart"),
+  appWrites: document.getElementById("appWrites"),
+  appMotors: document.getElementById("appMotors"),
+  allowedChannels: document.getElementById("allowedChannels"),
+  allowedBuses: document.getElementById("allowedBuses"),
+  allowedMonitors: document.getElementById("allowedMonitors"),
+  appError: document.getElementById("appError"),
+  appMessage: document.getElementById("appMessage"),
+  saveHint: document.getElementById("saveHint"),
 };
 
 initI18n();
@@ -209,9 +253,15 @@ let state = createInitialState();
 let previewToken = 0;
 let previewTimer = null;
 let demoPollTimer = null;
+let onAirPollTimer = null;
 let dialogContext = null;
 let draggingRole = null;
 let dragFindRole = null;
+/** Sends-on-fader simulation inside the main display editor. */
+let dialogSendActive = false;
+/** On-air simulation inside the main display editor; `null` follows Fairlight. */
+let dialogOnAirSim = null;
+let segmentClockTimer = null;
 
 function createDefaultLcdState() {
   return {
@@ -329,6 +379,7 @@ function createInitialState() {
     demo: false,
     configPath: "",
     config: null,
+    app: null,
     channels: [],
     channelByName: new Map(),
     buses: [],
@@ -339,6 +390,7 @@ function createInitialState() {
     surfaces,
     devices,
     fairlight: { host: "127.0.0.1", port: 9000 },
+    onAir: null,
     sendsOnFader: { enabled: false, busIndex: 1 },
     buttonAssignments: {},
     selectedButton: "f1",
@@ -510,6 +562,167 @@ function updateSavebar() {
   dom.reloadButton.disabled = !state.dirty || state.saving;
 }
 
+let saveHintDesktop = null;
+
+function applySaveHint(desktop) {
+  if (saveHintDesktop === desktop) return;
+  saveHintDesktop = desktop;
+  dom.saveHint.textContent = desktop
+    ? "Änderungen werden direkt nach dem Speichern übernommen."
+    : "Änderungen gelten ab dem nächsten Bridge-Start.";
+}
+
+function renderAppPanel() {
+  const app = state.app;
+  if (!app) {
+    dom.appPanel.hidden = true;
+    dom.navApp.hidden = true;
+    applySaveHint(false);
+    return;
+  }
+  dom.appPanel.hidden = false;
+  dom.navApp.hidden = false;
+  applySaveHint(true);
+
+  const bridge = app.bridge ?? {};
+  const running = Boolean(bridge.running);
+  dom.appStatus.textContent = running ? "Bridge läuft" : "Bridge gestoppt";
+  dom.appBridge.textContent = running ? "Läuft" : "Gestoppt";
+  if (bridge.fairlightConnected) {
+    dom.appFairlight.textContent =
+      app.onAir === null ? "Verbunden" : app.onAir ? "Verbunden · ON AIR" : "Verbunden · OFF AIR";
+  } else {
+    dom.appFairlight.textContent = "Nicht verbunden";
+  }
+  dom.appDevices.textContent =
+    bridge.devicesEnabled > 0
+      ? `${bridge.devicesOnline} von ${bridge.devicesEnabled} online`
+      : "Keine Geräte eingerichtet";
+  if (bridge.lastError) {
+    dom.appError.hidden = false;
+    dom.appError.textContent = bridge.lastError;
+  } else {
+    dom.appError.hidden = true;
+    dom.appError.textContent = "";
+  }
+
+  dom.appAutostart.checked = Boolean(app.autostart);
+  dom.appAutostart.disabled = !app.autostartSupported;
+  dom.appWrites.checked = Boolean(app.arming?.writes);
+  dom.appMotors.checked = Boolean(app.arming?.motors);
+  dom.appMotors.disabled = !dom.appWrites.checked;
+}
+
+let appUpdatePending = false;
+
+function parseNumberList(text, label) {
+  const values = [];
+  for (const token of String(text).split(/[\s,;]+/).filter(Boolean)) {
+    const value = Number(token);
+    if (!Number.isInteger(value) || value < 1) {
+      showToast(`${label}: „${token}“ ist keine gültige Nummer.`, "error", 6000);
+      return null;
+    }
+    if (!values.includes(value)) values.push(value);
+  }
+  return values;
+}
+
+function parseBusList(text) {
+  const values = [];
+  for (const token of String(text).split(/[\s,;]+/).filter(Boolean)) {
+    if (!/^[a-z]+:\d+$/.test(token)) {
+      showToast(`Busse: „${token}“ muss die Form main:1 haben.`, "error", 6000);
+      return null;
+    }
+    if (!values.includes(token)) values.push(token);
+  }
+  return values;
+}
+
+function buildSafety() {
+  const channels = parseNumberList(dom.allowedChannels.value, "Kanäle");
+  if (channels === null) return null;
+  const buses = parseBusList(dom.allowedBuses.value);
+  if (buses === null) return null;
+  const monitors = parseNumberList(dom.allowedMonitors.value, "Monitore");
+  if (monitors === null) return null;
+  return {
+    allowedWriteChannels: channels,
+    allowedWriteBuses: buses,
+    allowedWriteMonitors: monitors,
+  };
+}
+
+function renderSafetyFields() {
+  const safety = state.config?.safety;
+  if (!safety || !state.app) return;
+  dom.allowedChannels.value = (safety.allowedWriteChannels ?? []).join(", ");
+  dom.allowedBuses.value = (safety.allowedWriteBuses ?? []).join(", ");
+  dom.allowedMonitors.value = (safety.allowedWriteMonitors ?? []).join(", ");
+}
+
+async function updateAppSettings(patch) {
+  if (appUpdatePending) return;
+  appUpdatePending = true;
+  dom.appMessage.textContent = "Wird übernommen …";
+  try {
+    const data = await api("/api/app", { method: "POST", body: JSON.stringify(patch) });
+    if (data?.app) state.app = data.app;
+    renderAppPanel();
+    const safety = state.config?.safety;
+    if (
+      data?.app?.arming?.writes &&
+      safety &&
+      (safety.allowedWriteChannels?.length ?? 0) === 0 &&
+      (safety.allowedWriteBuses?.length ?? 0) === 0 &&
+      (safety.allowedWriteMonitors?.length ?? 0) === 0
+    ) {
+      showToast(
+        "Schreibzugriff ist aktiv, aber keine Ziele sind freigegeben. Trage Kanäle, Busse oder Monitore ein und speichere.",
+        "info",
+        8000,
+      );
+    }
+    dom.appMessage.textContent = "Übernommen.";
+    window.setTimeout(() => {
+      if (dom.appMessage.textContent === "Übernommen.") dom.appMessage.textContent = "";
+    }, 3000);
+  } catch (error) {
+    dom.appMessage.textContent = error.message;
+    showToast(error.message, "error", 6000);
+    await refreshAppInfo();
+  } finally {
+    appUpdatePending = false;
+  }
+}
+
+async function refreshAppInfo() {
+  if (!state.app) return;
+  try {
+    const data = await api("/api/app");
+    if (!data?.app) return;
+    if (JSON.stringify(data.app) === JSON.stringify(state.app)) return;
+    state.app = data.app;
+    renderAppPanel();
+  } catch {
+    // The settings page keeps working with the last known status.
+  }
+}
+
+let appPollTimer = null;
+
+function startAppStatusPolling() {
+  if (appPollTimer) {
+    window.clearInterval(appPollTimer);
+    appPollTimer = null;
+  }
+  if (!state.app) return;
+  appPollTimer = window.setInterval(() => {
+    void refreshAppInfo();
+  }, 3000);
+}
+
 function buildLayout() {
   const surfaces = {};
   for (const role of state.order) {
@@ -550,11 +763,14 @@ function fixedOwner(target, excludeRole, excludeStrip) {
 }
 
 function applyState(data) {
+  const onAirValue = data.fairlight?.onAir ?? data.onAir;
   state = {
     ...state,
     demo: Boolean(data.demo),
     configPath: data.configPath ?? "",
     config: data.config ?? null,
+    app: data.app ?? null,
+    onAir: !data.demo && typeof onAirValue === "boolean" ? onAirValue : null,
     midi: {
       inputs: Array.isArray(data.midi?.inputs) ? data.midi.inputs : [],
       outputs: Array.isArray(data.midi?.outputs) ? data.midi.outputs : [],
@@ -637,6 +853,7 @@ function applyState(data) {
       },
       encoder: device?.encoder === "pan" ? "pan" : "off",
       meters: Boolean(device?.meters),
+      mainDisplay: normalizeMainDisplay(device?.mainDisplay),
     };
   }
 
@@ -661,8 +878,13 @@ async function loadState() {
     dom.lcdSearch.value = "";
     renderLcdSettings();
     renderDevices();
+    renderAppPanel();
+    renderSafetyFields();
     if (dom.deviceDialog.open) dom.deviceDialog.close();
     updateStatus();
+    updateOnAirBadge();
+    startOnAirPolling();
+    startAppStatusPolling();
     setDiscoverMessage("");
     if (state.demo) startDemoPolling();
   } catch (error) {
@@ -1360,11 +1582,420 @@ function fillMonitorSelect(select, selected) {
   select.value = String(selected);
 }
 
+const SEGMENT_DIGITS = 10;
+
+function blankSegmentCells() {
+  return Array.from({ length: SEGMENT_DIGITS }, () => ({ character: " ", dot: false }));
+}
+
+function segmentCellsFromText(text) {
+  const cells = [];
+  for (const character of text) {
+    if (character === ".") {
+      const previous = cells[cells.length - 1];
+      if (previous) previous.dot = true;
+      continue;
+    }
+    cells.push({ character, dot: false });
+  }
+  if (cells.length > SEGMENT_DIGITS) cells.splice(0, cells.length - SEGMENT_DIGITS);
+  while (cells.length < SEGMENT_DIGITS) cells.unshift({ character: " ", dot: false });
+  return cells;
+}
+
+function pad2(value) {
+  return String(Math.abs(Math.trunc(value)) % 100).padStart(2, "0");
+}
+
+function clockSegmentCells() {
+  const now = new Date();
+  const cells = blankSegmentCells();
+  const place = (start, text) => {
+    Array.from(text).forEach((character, index) => {
+      const cell = cells[start + index];
+      if (cell) cell.character = character;
+    });
+  };
+  place(1, pad2(now.getHours()));
+  place(3, pad2(now.getMinutes()));
+  place(5, pad2(now.getSeconds()));
+  cells[4].dot = true;
+  cells[6].dot = true;
+  return cells;
+}
+
+function previewVisibleChannels(role, scope) {
+  const roles = scope === "main" ? [role] : state.order;
+  const channels = [];
+  for (const candidate of roles) {
+    const surface = previewFor(candidate);
+    if (!surface) continue;
+    for (const strip of surface.strips) {
+      const target = strip.target;
+      if (target?.kind === "channel" && Number.isInteger(target.channel)) channels.push(target.channel);
+    }
+  }
+  return channels;
+}
+
+function channelSegmentCells(channels) {
+  if (channels.length === 0) return null;
+  const first = channels[0];
+  const last = channels[channels.length - 1];
+  const contiguous = channels.every((channel, index) => index === 0 || channel === channels[index - 1] + 1);
+  return segmentCellsFromText(contiguous && channels.length > 1 ? `${first}  ${last}` : String(first));
+}
+
+/**
+ * Seven-segment preview: renders the cells the bridge would write, in the
+ * physical 3-2-2-3 grouping, with real segment glyphs. It shows the intended
+ * bytes, not verified device output; letters without a clean 7-segment form
+ * use the usual approximations (N as lower-case n, R as r).
+ */
+const SEG7_WIDTH = 19;
+const SEG7_HEIGHT = 34;
+const SEG7_THICK = 4;
+const SEG7_SCREEN = { x: 904, y: 159, width: 340, height: 52 };
+const SEG7_GROUPS = [3, 2, 2, 3];
+
+const SEG7_GLYPHS = {
+  "0": "abcdef",
+  "1": "bc",
+  "2": "abged",
+  "3": "abgcd",
+  "4": "fgbc",
+  "5": "afgcd",
+  "6": "afgcde",
+  "7": "abc",
+  "8": "abcdefg",
+  "9": "abcdfg",
+  " ": "",
+  "-": "g",
+  A: "abcefg",
+  b: "cdefg",
+  C: "adef",
+  d: "bcdeg",
+  E: "adefg",
+  F: "aefg",
+  G: "acdef",
+  H: "bcefg",
+  I: "bc",
+  J: "bcd",
+  L: "def",
+  n: "ceg",
+  O: "abcdef",
+  o: "cdeg",
+  P: "abefg",
+  r: "eg",
+  S: "acdfg",
+  t: "defg",
+  U: "bcdef",
+  y: "bcdfg",
+};
+const SEG7_ALIASES = { B: "b", D: "d", N: "n", R: "r" };
+
+function segmentGlyph(character) {
+  const direct = SEG7_GLYPHS[character];
+  if (direct !== undefined) return direct;
+  const alias = SEG7_ALIASES[character];
+  return alias === undefined ? "" : SEG7_GLYPHS[alias] ?? "";
+}
+
+function seg7Xs() {
+  const digitCount = SEG7_GROUPS.reduce((sum, count) => sum + count, 0);
+  // Inner gaps run within every group; between groups the leftover inner gap
+  // adds to the wider group gap.
+  const total =
+    digitCount * SEG7_WIDTH +
+    (digitCount - SEG7_GROUPS.length) * 3 +
+    (SEG7_GROUPS.length - 1) * (3 + 9);
+  const xs = [];
+  let x = SEG7_SCREEN.x + (SEG7_SCREEN.width - total) / 2;
+  for (const [groupIndex, count] of SEG7_GROUPS.entries()) {
+    if (groupIndex > 0) x += 9;
+    for (let index = 0; index < count; index += 1) {
+      xs.push(x);
+      x += SEG7_WIDTH + 3;
+    }
+  }
+  return xs;
+}
+
+function seg7Shapes(x, y) {
+  const w = SEG7_WIDTH;
+  const h = SEG7_HEIGHT;
+  const t = SEG7_THICK;
+  const mid = h / 2 - t / 2;
+  const vTop = t * 0.75;
+  const vLen = mid - t * 0.75 - 0.5;
+  const vBottom = mid + t * 1.25;
+  const horizontal = (sy) =>
+    `${x + 1.6},${sy} ${x + w - 1.6},${sy} ${x + w},${sy + t / 2} ${x + w - 1.6},${sy + t} ${x + 1.6},${sy + t} ${x},${sy + t / 2}`;
+  const vertical = (sx, sy) =>
+    `${sx},${sy + 1.6} ${sx + t / 2},${sy} ${sx + t},${sy + 1.6} ${sx + t},${sy + vLen - 1.6} ${sx + t / 2},${sy + vLen} ${sx},${sy + vLen - 1.6}`;
+  return {
+    a: horizontal(y),
+    g: horizontal(y + mid),
+    d: horizontal(y + h - t),
+    f: vertical(x, y + vTop),
+    b: vertical(x + w - t, y + vTop),
+    e: vertical(x, y + vBottom),
+    c: vertical(x + w - t, y + vBottom),
+  };
+}
+
+function seg7DigitSvg(x, y, cell) {
+  const glyph = segmentGlyph(cell.character);
+  let markup = "";
+  for (const [name, points] of Object.entries(seg7Shapes(x, y))) {
+    markup += `<polygon class="deck-seg${glyph.includes(name) ? " is-lit" : ""}" points="${points}"/>`;
+  }
+  markup += `<circle class="deck-seg-dot${cell.dot ? " is-lit" : ""}" cx="${(x + SEG7_WIDTH - 1.2).toFixed(1)}" cy="${(y + SEG7_HEIGHT + 4.5).toFixed(1)}" r="2.4"/>`;
+  return `<g>${markup}</g>`;
+}
+
+function segmentDisplayMarkup(role) {
+  const display = state.devices[role]?.mainDisplay ?? { mode: "off", scope: "surface" };
+  const cells = mainDisplayCellsFor(role, display) ?? blankSegmentCells();
+  const y = SEG7_SCREEN.y + (SEG7_SCREEN.height - SEG7_HEIGHT) / 2;
+  const xs = seg7Xs();
+  return cells.map((cell, index) => seg7DigitSvg(xs[index], y, cell)).join("");
+}
+
+function refreshSegmentDisplays() {
+  for (const group of document.querySelectorAll("[data-segment-display]")) {
+    group.innerHTML = segmentDisplayMarkup(group.dataset.segmentDisplay);
+  }
+}
+
+function stopSegmentClock() {
+  if (segmentClockTimer) {
+    window.clearInterval(segmentClockTimer);
+    segmentClockTimer = null;
+  }
+}
+
+function ensureSegmentClock() {
+  const role = state.dialogRole;
+  const mode = role ? state.devices[role]?.mainDisplay?.mode : "off";
+  if (mode !== "clock") {
+    stopSegmentClock();
+    return;
+  }
+  if (segmentClockTimer) return;
+  segmentClockTimer = window.setInterval(refreshSegmentDisplays, 1000);
+}
+
+function meterTargetLabel(target) {
+  const bus = state.buses.find((entry) => entry.type === target.busType && entry.index === target.index);
+  const type = (BUS_LABELS[target.busType] ?? target.busType).toUpperCase();
+  return bus ? `${type} ${target.index} · ${bus.name}` : `${type} ${target.index}`;
+}
+
+function meterDisplayValue(meter) {
+  const bus = state.buses.find(
+    (entry) => entry.type === meter.target.busType && entry.index === meter.target.index,
+  );
+  const raw = meter.measurement === "loudness" ? bus?.integratedLufs : bus?.meterDb;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return meter.measurement === "headroom" ? Math.min(99.9, Math.max(0, -raw)) : raw;
+  }
+  // Example value so the preview can show the intended formatting.
+  return meter.measurement === "headroom" ? 6 : -23.1;
+}
+
+function mainDisplayCellsFor(role, display) {
+  switch (display.mode) {
+    case "off":
+      return null;
+    case "clock":
+      return clockSegmentCells();
+    case "meter":
+      return display.meter ? segmentCellsFromText(meterDisplayValue(display.meter).toFixed(1)) : null;
+    case "on-air": {
+      const value = dialogOnAirSim === null ? state.onAir : dialogOnAirSim;
+      return typeof value === "boolean" ? segmentCellsFromText(value ? "ON AIR" : "OFF AIR") : null;
+    }
+    case "auto":
+      if (dialogSendActive && state.sendsOnFader.enabled) {
+        return segmentCellsFromText(String(state.sendsOnFader.busIndex ?? 1).padStart(2, "0"));
+      }
+      break;
+    default:
+      break;
+  }
+  return channelSegmentCells(previewVisibleChannels(role, display.scope));
+}
+
+function mainDisplayHint(display) {
+  switch (display.mode) {
+    case "off":
+      return "Die Bridge lässt die Anzeige unverändert.";
+    case "clock":
+      return "Lokale Uhrzeit des Bridge-Rechners. Beispiel, nicht am Gerät geprüft.";
+    case "meter":
+      return display.meter?.measurement === "headroom"
+        ? "Pegelreserve bis 0 dB aus dem Spitzenpegel des gewählten Busses; ohne Messwert zeigt die Vorschau einen Beispielwert."
+        : "Integrierte Lautheit des gewählten Main-Busses. Das Minuszeichen ist am Gerät nicht geprüft; die Vorschau zeigt ohne Messwert einen Beispielwert.";
+    case "on-air":
+      return "Experimentell: Die Lesbarkeit von Wörtern auf 7 Segmenten ist am Gerät nicht geprüft. Unbekannter Status bleibt leer.";
+    case "auto":
+      return `Im Betrieb: Bankbereich; bei aktivem Sends on Fader Aux ${String(
+        state.sendsOnFader.busIndex ?? 1,
+      ).padStart(2, "0")}. Ohne Fairlight bleibt sie leer.`;
+    default:
+      return "Folgt der Bank-Vorschau. Am Gerät nicht geprüft.";
+  }
+}
+
+function bankSimState() {
+  const preview = state.preview;
+  if (!preview || preview.bankStep <= 0) return { prev: false, next: false };
+  const page = Math.floor(preview.bankOffset / preview.bankStep) + 1;
+  return { prev: preview.bankOffset > 0, next: page < preview.bankPages };
+}
+
+function simButton(key, label, pressed, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.dataset.simKey = key;
+  button.textContent = label;
+  button.setAttribute("aria-pressed", String(pressed));
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function appendBankSim() {
+  const wrap = document.createElement("div");
+  wrap.className = "segment-sim";
+  const limits = bankSimState();
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.dataset.simKey = "bank-prev";
+  prev.className = "btn btn-ghost";
+  prev.textContent = "◀ Bank";
+  prev.setAttribute("aria-label", "Vorherige Bank");
+  prev.disabled = !limits.prev;
+  prev.addEventListener("click", () => moveBank(-1));
+  const next = document.createElement("button");
+  next.type = "button";
+  next.dataset.simKey = "bank-next";
+  next.className = "btn btn-ghost";
+  next.textContent = "Bank ▶";
+  next.setAttribute("aria-label", "Nächste Bank");
+  next.disabled = !limits.next;
+  next.addEventListener("click", () => moveBank(1));
+  wrap.append(prev, next);
+  dom.mainDisplaySim.append(wrap);
+}
+
+function appendMixSim() {
+  const wrap = document.createElement("div");
+  wrap.className = "segmented sim-segmented";
+  wrap.setAttribute("role", "group");
+  wrap.setAttribute("aria-label", "Sends on Fader simulieren");
+  const apply = (active) => {
+    dialogSendActive = active;
+    const [mainMix, auxMix] = [...wrap.children];
+    mainMix?.setAttribute("aria-pressed", String(!active));
+    auxMix?.setAttribute("aria-pressed", String(active));
+    refreshSegmentDisplays();
+  };
+  const auxLabel = `Aux ${String(state.sendsOnFader.busIndex ?? 1).padStart(2, "0")}`;
+  wrap.append(
+    simButton("mix-main", "Main Mix", !dialogSendActive, () => apply(false)),
+    simButton("mix-aux", auxLabel, dialogSendActive, () => apply(true)),
+  );
+  dom.mainDisplaySim.append(wrap);
+}
+
+function appendOnAirSim() {
+  const wrap = document.createElement("div");
+  wrap.className = "segmented sim-segmented";
+  wrap.setAttribute("role", "group");
+  wrap.setAttribute("aria-label", "On-Air-Zustand simulieren");
+  const shown = dialogOnAirSim === null ? state.onAir : dialogOnAirSim;
+  const options = [
+    { key: "onair-on", label: "On", value: true },
+    { key: "onair-off", label: "Off", value: false },
+    { key: "onair-unknown", label: "Unbekannt", value: null },
+  ];
+  for (const option of options) {
+    wrap.append(
+      simButton(option.key, option.label, option.value === shown, () => {
+        dialogOnAirSim = option.value;
+        for (const [index, button] of [...wrap.children].entries()) {
+          button.setAttribute("aria-pressed", String(options[index]?.value === option.value));
+        }
+        refreshSegmentDisplays();
+      }),
+    );
+  }
+  dom.mainDisplaySim.append(wrap);
+}
+
+function meterBusOptions(measurement, meter) {
+  const desired = meter ? `${meter.target.busType}:${meter.target.index}` : "";
+  const buses = state.buses
+    .filter((bus) => measurement !== "loudness" || bus.type === "main")
+    .slice()
+    .sort((a, b) => a.type.localeCompare(b.type) || a.index - b.index);
+  const options = buses.map((bus) => ({
+    value: `${bus.type}:${bus.index}`,
+    label: `${(BUS_LABELS[bus.type] ?? bus.type).toUpperCase()} ${bus.index} · ${bus.name}`,
+  }));
+  if (meter && !options.some((option) => option.value === desired)) {
+    options.push({ value: desired, label: `${meterTargetLabel(meter.target)} · nicht erkannt` });
+  }
+  return options;
+}
+
+function fillMeterTargetSelect(select, meter) {
+  select.replaceChildren();
+  for (const option of meterBusOptions(meter?.measurement ?? "loudness", meter)) {
+    const element = document.createElement("option");
+    element.value = option.value;
+    element.textContent = option.label;
+    select.append(element);
+  }
+  select.value = meter ? `${meter.target.busType}:${meter.target.index}` : "";
+}
+
+function renderMainDisplayEditor(role) {
+  const display = state.devices[role].mainDisplay;
+  dom.mainDisplayMode.value = display.mode;
+  dom.mainDisplayScope.value = display.scope;
+  dom.mainDisplayScopeField.hidden = display.mode !== "channels" && display.mode !== "auto";
+  const meterMode = display.mode === "meter";
+  dom.mainDisplayMeasurementField.hidden = !meterMode;
+  dom.mainDisplayTargetField.hidden = !meterMode;
+  if (meterMode) {
+    const meter = display.meter ?? {
+      measurement: "loudness",
+      target: { kind: "bus", busType: "main", index: 1 },
+    };
+    dom.mainDisplayMeasurement.value = meter.measurement;
+    fillMeterTargetSelect(dom.mainDisplayTarget, meter);
+  }
+  const active = document.activeElement;
+  const focusKey =
+    active instanceof Element && dom.mainDisplaySim.contains(active) ? active.dataset.simKey : null;
+  dom.mainDisplaySim.replaceChildren();
+  if (display.mode === "channels" || display.mode === "auto") appendBankSim();
+  if (display.mode === "auto" && state.sendsOnFader.enabled) appendMixSim();
+  if (display.mode === "on-air") appendOnAirSim();
+  if (focusKey) dom.mainDisplaySim.querySelector(`[data-sim-key="${focusKey}"]`)?.focus();
+  dom.mainDisplayHint.textContent = mainDisplayHint(display);
+  ensureSegmentClock();
+}
+
 function renderDialogEditor() {
   const role = state.dialogRole;
   if (!role) return;
   const main = isMainRole(role);
   dom.fkeyEditor.hidden = !main;
+  dom.mainDisplayEditor.hidden = !main;
+  if (main) renderMainDisplayEditor(role);
   if (main) {
     const selected = state.selectedButton;
     const assignment = state.buttonAssignments[selected] ?? null;
@@ -1405,6 +2036,8 @@ function renderDialogEditor() {
 function openDeviceDialog(role, opener) {
   state.dialogRole = role;
   state.dialogOpener = opener ?? null;
+  dialogSendActive = false;
+  dialogOnAirSim = null;
   const displayName = state.devices[role]?.name || rolePlaceholder(role);
   dom.deviceDialogTitle.textContent = displayName;
   dom.deviceDialogContext.textContent = isMainRole(role)
@@ -1723,7 +2356,7 @@ function deviceDeckSvg(role, options = {}) {
     ${channels}
     ${assignRow}
     <rect class="deck-screen" x="904" y="159" width="340" height="52" rx="5"/>
-    <text class="deck-lcd-text" x="1074" y="192" font-size="16">00:00:00:00</text>
+    <g data-segment-display="${role}">${segmentDisplayMarkup(role)}</g>
     ${key(872, 185, 48, 26, "NAME/VALUE", { button: "name-value" })}
     ${key(1297, 185, 48, 26, "SMPTE/BEATS", { fontSize: 4.6, button: "smpte-beats" })}
     ${viewRow}
@@ -1827,7 +2460,7 @@ function updateCard(role) {
   if (!device.enabled) {
     refs.note.textContent = "Gerät inaktiv · wird beim Banking nicht berücksichtigt";
   } else if (device.transport === "network") {
-    refs.note.textContent = "Netzwerk · nimmt noch nicht am Banking teil";
+    refs.note.textContent = "Netzwerk · RTP-MIDI · nimmt am Banking teil";
   } else if (surface.mode === "fixed") {
     const busCount = surface.fixedTargets.filter((target) => target?.kind === "bus").length;
     refs.note.textContent = fixedCount === 0
@@ -1871,10 +2504,10 @@ function updatePortStatus(role) {
       refs.portStatus.textContent = "Netzwerk vorbereitet · IP-Adresse eintragen";
       refs.portStatus.dataset.tone = "error";
     } else if (state.demo) {
-      refs.portStatus.textContent = `Netzwerk-Entwurf · Simulation für ${host}:${port}`;
+      refs.portStatus.textContent = `Netzwerk · Simulation für ${host}:${port}`;
       refs.portStatus.dataset.tone = "success";
     } else {
-      refs.portStatus.textContent = `Netzwerk gespeichert · Transport noch nicht aktiv (${host}:${port})`;
+      refs.portStatus.textContent = `Netzwerk gespeichert · RTP-MIDI (${host}:${port})`;
       delete refs.portStatus.dataset.tone;
     }
     return;
@@ -1996,12 +2629,45 @@ function firstUnusedPort() {
   return { name: candidate.name, occurrence: candidate.occurrence };
 }
 
-function addDevice() {
+function applyPorts(ports) {
+  if (!ports) return;
+  state.midi = {
+    inputs: Array.isArray(ports.inputs) ? ports.inputs : state.midi.inputs,
+    outputs: Array.isArray(ports.outputs) ? ports.outputs : state.midi.outputs,
+    error: typeof ports.error === "string" ? ports.error : null,
+  };
+  dom.portsMessage.textContent = state.midi.error
+    ? `Ports nicht verfügbar: ${state.midi.error}`
+    : `${state.midi.inputs.length} Eingänge, ${state.midi.outputs.length} Ausgänge gelesen`;
+  dom.portsMessage.dataset.tone = state.midi.error ? "error" : "success";
+}
+
+async function addDevice() {
+  if (dom.addDevice.disabled) return;
   const role = nextRoleId();
   const device = defaultDevice(role);
   const hasMain = state.order.some((entry) => state.devices[entry].kind === "main");
   device.kind = hasMain ? "extender" : "main";
-  const port = firstUnusedPort();
+  let port = null;
+  if (state.demo) {
+    dom.addDevice.disabled = true;
+    try {
+      const name = device.kind === "main" ? DEFAULT_PORTS.main : "X-Touch Extender";
+      const data = await api("/api/midi/ports", {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      });
+      port = data?.input ?? null;
+      applyPorts(data?.ports);
+    } catch (error) {
+      showToast(error.message, "error");
+      return;
+    } finally {
+      dom.addDevice.disabled = false;
+    }
+  } else {
+    port = firstUnusedPort();
+  }
   if (port) {
     device.input = { ...port };
     device.output = { ...port };
@@ -2084,8 +2750,8 @@ async function testNetworkDevice(role) {
     setNetworkStatus(refs, "Bitte zuerst eine IP-Adresse eintragen.", "error");
     return;
   }
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    setNetworkStatus(refs, "Der RTP-Port muss zwischen 1 und 65535 liegen.", "error");
+  if (!Number.isInteger(port) || port < 1 || port > 65534) {
+    setNetworkStatus(refs, "Der RTP-Port muss zwischen 1 und 65534 liegen.", "error");
     return;
   }
   refs.networkTest.disabled = true;
@@ -2483,6 +3149,32 @@ async function discoverChannels(event) {
   }
 }
 
+function updateOnAirBadge() {
+  if (!dom.onAirBadge) return;
+  dom.onAirBadge.hidden = state.demo;
+  if (state.demo) return;
+  const value = state.onAir;
+  dom.onAirBadge.dataset.state = value === true ? "on" : value === false ? "off" : "unknown";
+  dom.onAirBadge.textContent = value === true ? "ON AIR" : value === false ? "OFF AIR" : "Unbekannt";
+}
+
+function startOnAirPolling() {
+  if (onAirPollTimer !== null || state.demo) return;
+  const poll = async () => {
+    try {
+      const data = await api("/api/onair");
+      state.onAir = data?.onAir === true ? true : data?.onAir === false ? false : null;
+      updateOnAirBadge();
+    } catch {
+      // Keep the last confirmed state when the bridge is briefly unreachable.
+    }
+  };
+  onAirPollTimer = window.setInterval(() => {
+    void poll();
+  }, 5000);
+  void poll();
+}
+
 function updateStatus() {
   const count = state.channels.length;
   const busCount = state.buses.length;
@@ -2508,10 +3200,12 @@ function updateStatus() {
 
 async function saveSettings() {
   if (!state.dirty || state.saving) return;
+  const safety = state.app ? buildSafety() : null;
+  if (state.app && safety === null) return;
   state.saving = true;
   updateSavebar();
   try {
-    await api("/api/save", {
+    const result = await api("/api/save", {
       method: "POST",
       body: JSON.stringify({
         layout: buildLayout(),
@@ -2522,6 +3216,7 @@ async function saveSettings() {
           busIndex: state.sendsOnFader.busIndex,
         },
         buttonAssignments: state.buttonAssignments,
+        ...(safety ? { safety } : {}),
         devices: state.order.map((role) => ({
           role,
           kind: state.devices[role].kind,
@@ -2532,6 +3227,7 @@ async function saveSettings() {
           output: state.devices[role].output,
           encoder: state.devices[role].encoder,
           meters: state.devices[role].meters,
+          mainDisplay: state.devices[role].mainDisplay,
           network:
             state.devices[role].transport === "network"
               ? {
@@ -2543,8 +3239,14 @@ async function saveSettings() {
       }),
     });
     state.saving = false;
+    if (result?.config) state.config = result.config;
     markClean();
-    showToast("Gespeichert. Die neue Belegung gilt beim nächsten Bridge-Start.", "success", 6000);
+    if (result?.requiresRestart === false) {
+      await refreshAppInfo();
+      showToast("Gespeichert. Die Bridge läuft mit der neuen Belegung.", "success", 6000);
+    } else {
+      showToast("Gespeichert. Die neue Belegung gilt beim nächsten Bridge-Start.", "success", 6000);
+    }
   } catch (error) {
     state.saving = false;
     updateSavebar();
@@ -2558,6 +3260,57 @@ function wireStaticEvents() {
   });
   dom.discoverForm.addEventListener("submit", (event) => {
     void discoverChannels(event);
+  });
+  dom.mainDisplayMode.addEventListener("change", () => {
+    const role = state.dialogRole;
+    if (!role || !isMainRole(role)) return;
+    const display = state.devices[role].mainDisplay;
+    display.mode = MAIN_DISPLAY_MODES.includes(dom.mainDisplayMode.value)
+      ? dom.mainDisplayMode.value
+      : "off";
+    if (display.mode === "meter" && !display.meter) {
+      display.meter = { measurement: "loudness", target: { kind: "bus", busType: "main", index: 1 } };
+    }
+    markDirty();
+    renderDialogEditor();
+    refreshSegmentDisplays();
+  });
+  dom.mainDisplayMeasurement.addEventListener("change", () => {
+    const role = state.dialogRole;
+    if (!role || !isMainRole(role)) return;
+    const meter = state.devices[role].mainDisplay.meter;
+    if (!meter) return;
+    meter.measurement = MAIN_DISPLAY_MEASUREMENTS.includes(dom.mainDisplayMeasurement.value)
+      ? dom.mainDisplayMeasurement.value
+      : "loudness";
+    if (meter.measurement === "loudness" && meter.target.busType !== "main") {
+      meter.target = { kind: "bus", busType: "main", index: 1 };
+    }
+    markDirty();
+    renderDialogEditor();
+    refreshSegmentDisplays();
+  });
+  dom.mainDisplayTarget.addEventListener("change", () => {
+    const role = state.dialogRole;
+    if (!role || !isMainRole(role)) return;
+    const meter = state.devices[role].mainDisplay.meter;
+    if (!meter) return;
+    const [busType, rawIndex] = String(dom.mainDisplayTarget.value).split(":");
+    const index = Number(rawIndex);
+    if (!Object.prototype.hasOwnProperty.call(BUS_LABELS, busType) || !Number.isInteger(index) || index < 1) {
+      return;
+    }
+    meter.target = { kind: "bus", busType, index };
+    markDirty();
+    refreshSegmentDisplays();
+  });
+  dom.mainDisplayScope.addEventListener("change", () => {
+    const role = state.dialogRole;
+    if (!role || !isMainRole(role)) return;
+    state.devices[role].mainDisplay.scope = dom.mainDisplayScope.value === "main" ? "main" : "surface";
+    markDirty();
+    renderDialogEditor();
+    refreshSegmentDisplays();
   });
   dom.buttonFunction.addEventListener("change", () => {
     const value = dom.buttonFunction.value;
@@ -2628,6 +3381,21 @@ function wireStaticEvents() {
   dom.saveButton.addEventListener("click", () => {
     void saveSettings();
   });
+  dom.appAutostart.addEventListener("change", () => {
+    void updateAppSettings({ autostart: dom.appAutostart.checked });
+  });
+  dom.appWrites.addEventListener("change", () => {
+    void updateAppSettings({
+      writes: dom.appWrites.checked,
+      motors: dom.appWrites.checked ? dom.appMotors.checked : false,
+    });
+  });
+  dom.appMotors.addEventListener("change", () => {
+    void updateAppSettings({ motors: dom.appMotors.checked });
+  });
+  for (const field of [dom.allowedChannels, dom.allowedBuses, dom.allowedMonitors]) {
+    field.addEventListener("input", markDirty);
+  }
   dom.reloadButton.addEventListener("click", () => {
     if (state.dirty && !window.confirm("Ungespeicherte Änderungen verwerfen?")) return;
     void loadState().then(() => showToast("Vom Server neu geladen."));
@@ -2642,6 +3410,10 @@ function wireStaticEvents() {
     const opener = state.dialogOpener;
     state.dialogRole = null;
     state.dialogOpener = null;
+    dialogSendActive = false;
+    dialogOnAirSim = null;
+    stopSegmentClock();
+    updateAllCards();
     if (opener && document.contains(opener)) window.setTimeout(() => opener.focus(), 30);
   });
   dom.channelClear.addEventListener("click", () => {
@@ -2657,6 +3429,11 @@ function wireStaticEvents() {
     if (!state.dirty) return;
     event.preventDefault();
     event.returnValue = "";
+  });
+  window.addEventListener("beforeunload", () => {
+    if (onAirPollTimer === null) return;
+    window.clearInterval(onAirPollTimer);
+    onAirPollTimer = null;
   });
 }
 
